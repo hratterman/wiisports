@@ -39,12 +39,23 @@
 //   mkwStorageLockWaitMs how long to wait for the lock before going read-only (default 1500)
 //   onMkwStorageError   callback(message) for mount/sync failures
 //   onMkwStorageReadOnly callback(message) when another tab owns the save store (read-only mode)
+//   mkwDiscCache        false: always stream the disc over the network (no local copy)
+//   mkwDiscCacheDelayMs how long after the first disc read the background download starts (10000)
+//   onMkwDiscCache      callback(cachedBytes, totalBytes, state) as the local disc copy fills;
+//                       state 'filling' | 'complete' | 'stopped'
+// Local disc copy (MkwDiscCache, disc mount only): every read over the network costs a round trip
+// through whatever sits between the browser and the server, and Resort reads its streamed music
+// (Sound/Static/stream/*.brstm) continuously, so a slow request stalls the game thread. Once the
+// game is running, the page downloads the whole disc in the background into the Origin Private
+// File System, one file per disc path, and reads of a completed file are served from there. The
+// copy is keyed by a hash of the manifest, so a different disc starts a fresh copy. Only one tab
+// downloads at a time (Web Lock 'wsr-disc-cache'), and the download yields to game reads.
 // Module helpers installed here:
 //   Module.mkwStorageFlush()  -> Promise; persists the store now (e.g. before closing the tab)
 //   Module.mkwStorageStatus   'persistent' | 'readonly' | 'memory' | 'error' (after preRun)
 
 addToLibrary({
-  $MkwDvd__deps: ['$MkwStorage'],
+  $MkwDvd__deps: ['$MkwStorage', '$MkwDiscCache'],
   $MkwDvd__postset: 'MkwDvd.init();',
   $MkwDvd: {
     // Per mount: {label, manifestPromise, baseUrl}; index = WebDisc::Mount.
@@ -134,6 +145,8 @@ addToLibrary({
           : MkwDvd.resolveUrl(manifest['root'] ?? source.defaultRoot, manifestUrl);
         if (!base.endsWith('/')) base += '/';
         state.baseUrl = base;
+        // Waited for here so the game's first reads can already be local; listing the copy is quick.
+        if (mount == 0) await MkwDiscCache.open(files);
 
         const valid = (path) => typeof path == 'string' && path.length > 0 && !/[\t\n\r\0]/.test(path);
         const lines = [`MKWDISC\t1\t${base}`];
@@ -179,8 +192,27 @@ addToLibrary({
       throw lastError;
     },
 
+    // Game reads in flight; the background disc download waits while this is non-zero.
+    inflight: 0,
+
     async read(mount, relPath, offset, length, dest) {
       if (!MkwDvd.mounts[mount]?.baseUrl) return -2; // manifest never loaded
+      ++MkwDvd.inflight;
+      try {
+        if (mount == 0) {
+          const local = await MkwDiscCache.read(relPath, offset, length);
+          if (local) {
+            HEAPU8.set(local, dest);
+            return local.length;
+          }
+        }
+        return await MkwDvd.readNetwork(mount, relPath, offset, length, dest);
+      } finally {
+        if (--MkwDvd.inflight == 0) MkwDiscCache.wakeIdle();
+      }
+    },
+
+    async readNetwork(mount, relPath, offset, length, dest) {
       const url = MkwDvd.urlFor(mount, relPath);
       let response;
       try {
@@ -225,6 +257,202 @@ addToLibrary({
       // HEAPU8 is re-read after the awaits: memory may have grown meanwhile.
       HEAPU8.set(bytes.subarray(start, start + count), dest);
       return count;
+    },
+  },
+
+  $MkwDiscCache__deps: ['$MkwDvd'],
+  $MkwDiscCache: {
+    enabled: false,
+    dir: null,            // OPFS directory of this disc version
+    files: new Map(),     // relPath -> File, complete local copies
+    sizes: new Map(),     // relPath -> size from the manifest
+    queue: [],            // relPaths still to download, in order
+    wanted: new Set(),    // relPaths the game read while uncached: downloaded first
+    totalBytes: 0,
+    cachedBytes: 0,
+    started: false,
+    stopped: false,
+    sawRead: false,       // the game has read the disc (reads can come before open() finishes)
+    idleWaiters: [],
+
+    // Opens (or starts) the local copy for this manifest. Never rejects; on any failure the disc
+    // simply keeps streaming.
+    async open(manifestFiles) {
+      if (Module['mkwDiscCache'] === false) return;
+      const storage = globalThis.navigator?.storage;
+      if (!storage?.getDirectory || typeof FileSystemFileHandle == 'undefined' ||
+          !FileSystemFileHandle.prototype.createWritable) {
+        return;
+      }
+      try {
+        const entries = Object.entries(manifestFiles).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(entries)));
+        const key = 'v-' + Array.from(new Uint8Array(digest).subarray(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+
+        const root = await (await storage.getDirectory()).getDirectoryHandle('wsr-disc', { create: true });
+        // A copy of another disc version is dead weight: drop it.
+        for await (const name of root.keys()) {
+          if (name !== key) await root.removeEntry(name, { recursive: true }).catch(() => {});
+        }
+        const dir = await root.getDirectoryHandle(key, { create: true });
+        for (const [path, size] of entries) {
+          MkwDiscCache.sizes.set(path, size);
+          MkwDiscCache.totalBytes += size;
+        }
+        // createWritable only commits on close(), so a file with the manifest's size is complete.
+        for await (const [name, handle] of dir.entries()) {
+          let path = null;
+          try { path = decodeURIComponent(name); } catch (e) {}
+          const file = handle.kind === 'file' ? await handle.getFile() : null;
+          if (file && path !== null && MkwDiscCache.sizes.get(path) === file.size) {
+            MkwDiscCache.files.set(path, file);
+            MkwDiscCache.cachedBytes += file.size;
+          } else {
+            await dir.removeEntry(name, { recursive: true }).catch(() => {});
+          }
+        }
+        MkwDiscCache.queue = entries.map(([path]) => path).filter((path) => !MkwDiscCache.files.has(path));
+        MkwDiscCache.dir = dir;
+        MkwDiscCache.enabled = true;
+        // Ask the browser not to evict the copy under storage pressure (granted or not, it works).
+        storage.persist?.().catch(() => {});
+        MkwDiscCache.report(MkwDiscCache.queue.length ? 'filling' : 'complete');
+        if (MkwDiscCache.sawRead) MkwDiscCache.start();
+        out(`[dvd/web] local disc copy: ${MkwDiscCache.files.size}/${entries.length} files ` +
+            `(${(MkwDiscCache.cachedBytes / 1048576).toFixed(0)}/${(MkwDiscCache.totalBytes / 1048576).toFixed(0)} MB)`);
+      } catch (e) {
+        err(`[dvd/web] local disc copy unavailable, streaming instead: ${e && e.message || e}`);
+      }
+    },
+
+    report(state) {
+      Module['mkwDiscCacheStatus'] = { 'cached': MkwDiscCache.cachedBytes, 'total': MkwDiscCache.totalBytes, 'state': state };
+      try {
+        Module['onMkwDiscCache']?.(MkwDiscCache.cachedBytes, MkwDiscCache.totalBytes, state);
+      } catch (e) {}
+    },
+
+    // Bytes [offset, offset + length) of a completed local file, or null to use the network.
+    async read(relPath, offset, length) {
+      MkwDiscCache.sawRead = true;
+      if (!MkwDiscCache.enabled) return null;
+      const file = MkwDiscCache.files.get(relPath);
+      if (!file) {
+        if (MkwDiscCache.sizes.has(relPath)) MkwDiscCache.wanted.add(relPath);
+        MkwDiscCache.start();
+        return null;
+      }
+      try {
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+      } catch (e) {
+        // The browser dropped or invalidated the file: forget it and fetch it again later.
+        err(`[dvd/web] local copy of ${relPath} unreadable (${e && e.message || e}); streaming it`);
+        MkwDiscCache.files.delete(relPath);
+        MkwDiscCache.cachedBytes -= file.size;
+        MkwDiscCache.queue.push(relPath);
+        return null;
+      }
+    },
+
+    wakeIdle() {
+      const waiters = MkwDiscCache.idleWaiters;
+      MkwDiscCache.idleWaiters = [];
+      for (const resolve of waiters) resolve();
+    },
+
+    // Resolves once no game read is in flight.
+    async gameIdle() {
+      while (MkwDvd.inflight > 0) {
+        await new Promise((resolve) => MkwDiscCache.idleWaiters.push(resolve));
+      }
+    },
+
+    // Starts the background download once, a while after the game's first disc read so it does
+    // not compete with boot.
+    start() {
+      if (MkwDiscCache.started || !MkwDiscCache.enabled || !MkwDiscCache.queue.length) return;
+      MkwDiscCache.started = true;
+      const delay = Module['mkwDiscCacheDelayMs'] ?? 10000;
+      setTimeout(() => {
+        const locks = globalThis.navigator?.locks;
+        if (!locks?.request) { MkwDiscCache.fill(); return; }
+        // One downloading tab per browser; a second tab just reads what is complete at its start.
+        locks.request('wsr-disc-cache', { ifAvailable: true }, (lock) => lock ? MkwDiscCache.fill() : null)
+          .catch(() => {});
+      }, delay);
+    },
+
+    nextPath() {
+      for (const path of MkwDiscCache.wanted) {
+        MkwDiscCache.wanted.delete(path);
+        const i = MkwDiscCache.queue.indexOf(path);
+        if (i >= 0) { MkwDiscCache.queue.splice(i, 1); return path; }
+      }
+      return MkwDiscCache.queue.shift();
+    },
+
+    async fill() {
+      let failures = 0;
+      for (let path; (path = MkwDiscCache.nextPath()) !== undefined;) {
+        if (MkwDiscCache.files.has(path)) continue;
+        try {
+          await MkwDiscCache.download(path);
+          failures = 0;
+          MkwDiscCache.report(MkwDiscCache.queue.length ? 'filling' : 'complete');
+        } catch (e) {
+          const quota = e && e.name === 'QuotaExceededError';
+          err(`[dvd/web] background download of ${path} failed: ${e && e.message || e}`);
+          if (quota || ++failures >= 5) {
+            MkwDiscCache.stopped = true;
+            MkwDiscCache.report('stopped');
+            err(`[dvd/web] local disc copy stopped${quota ? ' (browser storage is full)' : ''}; the rest streams`);
+            return;
+          }
+          MkwDiscCache.queue.push(path);
+          await new Promise((resolve) => setTimeout(resolve, 2000 * failures));
+        }
+      }
+    },
+
+    // Downloads one disc file in chunks, each started only while the game has no read waiting.
+    async download(path) {
+      const size = MkwDiscCache.sizes.get(path);
+      const name = encodeURIComponent(path);
+      const handle = await MkwDiscCache.dir.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      const url = MkwDvd.urlFor(0, path);
+      const chunk = 2 * 1024 * 1024;
+      try {
+        for (let offset = 0; offset < size;) {
+          await MkwDiscCache.gameIdle();
+          const end = Math.min(size, offset + chunk) - 1;
+          // no-store: the copy lives in OPFS; keeping it in the HTTP cache too would store it twice.
+          const response = await MkwDvd.fetchWithRetry(url, {
+            headers: { 'Range': `bytes=${offset}-${end}` },
+            priority: 'low',
+            cache: 'no-store',
+          });
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          if (response.status == 200 && bytes.length == size) {
+            // The server sent the whole file instead of the range: take it.
+            await writable.write({ type: 'write', position: 0, data: bytes });
+            offset = size;
+            continue;
+          }
+          if (response.status != 206) throw new Error(`HTTP ${response.status} for a range of ${url}`);
+          if (bytes.length != end - offset + 1) throw new Error(`short range from ${url}`);
+          await writable.write({ type: 'write', position: offset, data: bytes });
+          offset += bytes.length;
+        }
+        await writable.close();
+      } catch (e) {
+        await writable.abort().catch(() => {});
+        throw e;
+      }
+      const file = await handle.getFile();
+      if (file.size !== size) throw new Error(`local copy of ${path} has ${file.size} bytes, expected ${size}`);
+      MkwDiscCache.files.set(path, file);
+      MkwDiscCache.cachedBytes += size;
     },
   },
 

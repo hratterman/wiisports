@@ -120,7 +120,7 @@ struct Stats {
 Stats GetStats();
 
 inline constexpr uint32_t kBlockSize = 256u * 1024u;
-inline constexpr size_t kDefaultCacheBudget = size_t{64} * 1024u * 1024u;
+inline constexpr size_t kDefaultCacheBudget = size_t{256} * 1024u * 1024u;
 // Largest single Range request; longer runs of missing blocks are split.
 inline constexpr uint32_t kMaxRequestBytes = 16u * 1024u * 1024u;
 

@@ -140,6 +140,12 @@ precompiled in `web/prebuilt/`, so a host only compiles the runtime and their ow
   controls panel (☰, then Controls). Other devices need the `https://` address from "Let other
   people play".
 - **Saves** stay in your browser. Clearing the site's data deletes them.
+- **Disc copy:** the disc streams from the server at first. About ten seconds after the game
+  starts, the page also downloads the whole disc (about 850 MB) into the browser in the
+  background, pausing whenever the game itself is reading, and a "Caching disc" chip on the
+  toolbar shows how far along it is. Files that have finished downloading are read locally,
+  so streamed music and level loads stop waiting on the network. The copy survives reloads and
+  resumes where it left off. Clearing the site's data deletes it.
 - **No online play:** browsers have no raw network sockets.
 
 ## Repository layout

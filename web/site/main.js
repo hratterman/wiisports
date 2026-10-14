@@ -1000,6 +1000,9 @@
     onMkwStorageReadOnly: function (message) { // raised by web/js/library_mkw_dvd.js (another tab owns the saves)
       showSaveBanner(message);
     },
+    onMkwDiscCache: function (cached, total, state) { // raised by web/js/library_mkw_dvd.js
+      showDiscCache(cached, total, state);
+    },
     onMkwFatal: function (message) { // raised by web/js/library_mkw_host.js
       showError('guest-fatal', message);
     },
@@ -1010,6 +1013,21 @@
   };
   window.Module = Module;
   attachInputPanel(Module);
+
+  // Toolbar chip while the background download fills the local disc copy; gone once it is complete.
+  function showDiscCache(cached, total, state) {
+    let chip = document.getElementById('disc-cache');
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.id = 'disc-cache';
+      chip.className = 'chip';
+      chip.title = 'Saving the disc in this browser so the game stops streaming it over the network';
+      el.toolbar.appendChild(chip);
+    }
+    const percent = total ? Math.floor(100 * cached / total) : 0;
+    chip.style.display = state === 'complete' ? 'none' : ''; // .chip sets display, so [hidden] alone does not hide it
+    chip.textContent = state === 'stopped' ? 'Disc cache stopped at ' + percent + '%' : 'Caching disc ' + percent + '%';
+  }
 
   // Shown when another tab of this site owns the save store (Web Locks): this tab only reads the
   // saves. Built in script so it works with any index.html.

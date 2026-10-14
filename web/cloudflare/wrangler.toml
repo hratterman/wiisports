@@ -1,5 +1,6 @@
-# Cloudflare deployment for the hosted build (see docs/hosting.md).
-# web/tools/deploy_cloudflare.py fills in the bucket name and uploads the site.
+# Alternative to self-hosting with wsr-host (host/macmini/README.md): serve the built site from an
+# R2 bucket through this Worker, with Cloudflare Access on the Worker's route. Upload web/dist to
+# the bucket with `wrangler r2 object put` (or rclone), then `wrangler deploy` from this folder.
 name = "wiisports"
 main = "worker.js"
 compatibility_date = "2026-09-01"

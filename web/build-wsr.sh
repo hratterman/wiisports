@@ -6,8 +6,8 @@
 # DISC_IMAGE_OR_EXTRACTED_DIR is your own PAL Wii Sports Resort (RZTP01, Rev 1) as RVZ / ISO / WBFS /
 # any format nodtool reads, or an already extracted DATA partition (a folder with sys/main.dol).
 # The script verifies it, translates the game's PowerPC code to C++, compiles everything to
-# WebAssembly and writes a static site (default web/dist/) that web/serve.py or the Cloudflare
-# deployment (web/cloudflare, docs/hosting.md) can serve. Nothing derived from the disc is ever
+# WebAssembly and writes a static site (default web/dist/) that web/serve.py or wsr-host
+# (host/, host/macmini/README.md) can serve. Nothing derived from the disc is ever
 # written inside the repo except under work/ and web/dist/, both git-ignored.
 #
 # Extra CMake arguments go in WSR_CMAKE_ARGS (e.g. -DFETCHCONTENT_SOURCE_DIR_FMT=/path to use local
@@ -164,6 +164,6 @@ cat <<EOF
 
 ==> Done: $out_dir ($(du -sh "$out_dir" | awk '{print $1}'))
     Try it locally:  $python_bin web/serve.py --dir "$out_dir"    then open http://127.0.0.1:8080/
-    Host it:         python3 web/tools/deploy_cloudflare.py --dist "$out_dir"   (docs/hosting.md)
+    Host it:         host/macmini/README.md (wsr-host behind a Cloudflare Tunnel + Access)
     Browser:         desktop Chrome or Edge 137+ (WebGPU + JSPI). Phone controller: any phone browser.
 EOF

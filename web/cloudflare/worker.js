@@ -44,8 +44,10 @@ async function serveFile(request, env, url) {
   const headers = new Headers({
     'Content-Type': TYPES[ext] || 'application/octet-stream',
     'Accept-Ranges': 'bytes',
-    // Disc files never change for a given build; the page and its code may on redeploy.
-    'Cache-Control': key.startsWith('disc/') ? 'private, max-age=31536000, immutable' : 'private, no-cache',
+    // Disc files never change, and the build content-hashes the wasm name (precompress_dist.py);
+    // the page and its scripts may change on redeploy.
+    'Cache-Control': key.startsWith('disc/') || /\.[0-9a-f]{8}\.wasm$/.test(key)
+      ? 'private, max-age=31536000, immutable' : 'private, no-cache',
     'X-Content-Type-Options': 'nosniff',
   });
   const range = request.headers.get('Range');

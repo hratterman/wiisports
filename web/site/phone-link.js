@@ -157,6 +157,14 @@
     try { localStorage.setItem('wsrRoomCode', room); } catch (_) { /* private mode */ }
   }
   addToolbarButton();
+  // Show the card on the loading screen only: once the game is running it would cover Resort's
+  // corner prompts. The toolbar's Phone button brings it back.
+  const loader = document.getElementById('loader');
+  if (loader) {
+    const sync = () => { if (loader.hidden) card.hidden = true; };
+    new MutationObserver(sync).observe(loader, { attributes: true, attributeFilter: ['hidden'] });
+    sync();
+  }
   render();
   if (location.protocol === 'file:') {
     card.querySelector('.state').textContent = 'Phone pairing needs the site to be served over http(s).';

@@ -28,5 +28,10 @@ bool Connected() noexcept { return detail::Get().connected != 0; }
 uint32_t Generation() noexcept { return detail::Get().generation; }
 uint32_t Buttons() noexcept { return detail::Get().buttons; }
 uint32_t Flags() noexcept { return detail::Get().flags; }
+void Stick(double& x, double& y) noexcept {
+    const auto& s = detail::Get();
+    x = s.stickX / 1000.0;
+    y = s.stickY / 1000.0;
+}
 
 } // namespace WebPhone

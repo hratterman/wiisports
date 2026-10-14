@@ -71,8 +71,12 @@ constexpr uint32_t kRawSize = 0x40u;
 constexpr uint32_t kRawButton = 0x00, kRawAcc = 0x02, kRawObj = 0x08, kRawDev = 0x28, kRawErr = 0x29,
                    kRawMpStat = 0x36, kRawMpPitch = 0x38, kRawMpYaw = 0x3A, kRawMpRoll = 0x3C, kRawFmt = 0x3E;
 
-constexpr uint8_t kDevCore = 0, kDevMpls = 5;
-constexpr uint8_t kFmtCoreAccDpd = 2, kFmtMpls = 0x10;
+constexpr uint8_t kDevCore = 0, kDevFreestyle = 1, kDevMpls = 5, kDevMplsFreestyle = 6;
+constexpr uint8_t kFmtCoreAccDpd = 2, kFmtFreestyleAccDpd = 5, kFmtMpls = 0x10;
+// KPADStatus.ex_status as KPADFSStatus (Nunchuk), and the Nunchuk tail of the raw WPAD status
+// (same layout as runtime/src/hle/input/kpad.cpp uses for real Nunchuks).
+constexpr uint32_t kFsStick = 0x60, kFsAcc = 0x68, kFsAccValue = 0x74, kFsAccSpeed = 0x78;
+constexpr uint32_t kRawFsStickX = 0x2A, kRawFsStickY = 0x2B, kRawFsAcc = 0x2C;
 constexpr int32_t kKpadErrNone = 0, kKpadErrNoController = -2;
 }  // namespace guest
 
@@ -80,6 +84,7 @@ constexpr int32_t kKpadErrNone = 0, kKpadErrNoController = -2;
 enum : uint32_t {
     kBtnLeft = 0x0001, kBtnRight = 0x0002, kBtnDown = 0x0004, kBtnUp = 0x0008, kBtnPlus = 0x0010,
     kBtn2 = 0x0100, kBtn1 = 0x0200, kBtnB = 0x0400, kBtnA = 0x0800, kBtnMinus = 0x1000, kBtnHome = 0x8000,
+    kBtnZ = 0x2000, kBtnC = 0x4000,   // Nunchuk buttons, in the same hold word
 };
 
 // ------------------------------------------------------------------------------------------------ bindings
@@ -187,6 +192,9 @@ struct Sample {
     std::array<uint32_t,15> mpls{};
     bool sdkMpls = false;
     Vec3 acc;               // KPAD acc (g, "gravity direction" convention: (0,-1,0) at rest)
+    bool nunchuk = false;   // a Nunchuk is plugged into the (virtual) MotionPlus
+    double stick[2] = {0, 0};   // Nunchuk stick, KPAD units: -1..1, up positive
+    Vec3 nunchukAcc{0, -1, 0};  // Nunchuk KPAD acc, same convention as acc
     double posX = 0, posY = 0;
     bool pointerValid = false;
     double roll = 0;
@@ -228,6 +236,9 @@ struct Remote {
     double binTime = 0;
     Vec3 binGyro;
     bool recenterHeld = false;
+    bool nunchuk = false;        // last host input had a Nunchuk attached (WPADProbe reports it)
+    Vec3 gravity{0, -1, 0};      // slow average of acc, for the pedalling Nunchuk mirror
+    double nunchukShakeTime = 0;
     int stepFrame = -1;
     uint64_t batch = 0;
     std::unordered_map<uint32_t,uint64_t> readerBatch;
@@ -347,6 +358,8 @@ struct HostInput {
     bool controller = false;
     uint32_t hold = 0;
     bool tilt = false, shake = false, recenter = false;
+    bool nunchuk = false, nunchukShake = false, pedal = false;
+    double stick[2] = {0, 0};
     Vec3 gyro;
     Vec3 acc;
     bool accValid = false;
@@ -389,10 +402,17 @@ void ReadPhone(HostInput& in) {
         r.sensors.clear(); r.sensorTime = 0; r.binTime = 0; r.binGyro = {};
         return;
     }
+    const uint32_t flags = WebPhone::Flags();
+    in.nunchuk = (flags & WebPhone::kFlagNunchuk) != 0;
     in.hold = WebPhone::Buttons() & (kBtnLeft | kBtnRight | kBtnDown | kBtnUp | kBtnPlus | kBtn2 | kBtn1 |
-                                     kBtnB | kBtnA | kBtnMinus | kBtnHome);
-    in.recenter = (WebPhone::Flags() & WebPhone::kFlagRecenter) != 0;
-    in.shake = (WebPhone::Flags() & WebPhone::kFlagShake) != 0;
+                                     kBtnB | kBtnA | kBtnMinus | kBtnHome | (in.nunchuk ? kBtnZ | kBtnC : 0u));
+    in.recenter = (flags & WebPhone::kFlagRecenter) != 0;
+    in.shake = (flags & WebPhone::kFlagShake) != 0;
+    if (in.nunchuk) {
+        in.nunchukShake = (flags & WebPhone::kFlagNunchukShake) != 0;
+        in.pedal = (flags & WebPhone::kFlagPedal) != 0;
+        WebPhone::Stick(in.stick[0], in.stick[1]);
+    }
 }
 #endif
 
@@ -424,6 +444,8 @@ HostInput ReadHost() {
         CurrentRemote().pointerPose = {};
         CurrentRemote().bias = {};
         CurrentRemote().recenterHeld = false;
+        CurrentRemote().nunchuk = false;
+        CurrentRemote().gravity = {0, -1, 0};
         if (in.window) SDL_SetWindowRelativeMouseMode(in.window, false);
     }
 #if defined(__EMSCRIPTEN__)
@@ -638,6 +660,10 @@ void Zero(uint32_t a, uint32_t size) {
     for (uint32_t o = 0; o < size; o += 4) Memory::Write32(a + o, 0);
 }
 
+uint8_t DeviceType(bool mpls, bool nunchuk) {
+    return nunchuk ? (mpls ? guest::kDevMplsFreestyle : guest::kDevFreestyle) : (mpls ? guest::kDevMpls : guest::kDevCore);
+}
+
 void WriteStatus(uint32_t a, const Sample& s, const Sample* older, bool mpls, uint32_t& prevHold) {
     Remote& r = CurrentRemote();
     Zero(a, guest::kStatusSize);
@@ -666,10 +692,18 @@ void WriteStatus(uint32_t a, const Sample& s, const Sample* older, bool mpls, ui
     // acc_vertical: the gravity direction projected on the remote's Y/Z plane.
     WriteVec2(a + guest::kAccVertical, -s.acc.y, s.acc.z);
 
-    Memory::Write8(a + guest::kDevType, mpls ? guest::kDevMpls : guest::kDevCore);
+    Memory::Write8(a + guest::kDevType, DeviceType(mpls, s.nunchuk));
     Memory::Write8(a + guest::kWpadErr, 0);
     Memory::Write8(a + guest::kDpdValid, s.pointerValid ? 2 : 0);
-    Memory::Write8(a + guest::kDataFormat, mpls ? guest::kFmtMpls : guest::kFmtCoreAccDpd);
+    Memory::Write8(a + guest::kDataFormat,
+                   mpls ? guest::kFmtMpls : s.nunchuk ? guest::kFmtFreestyleAccDpd : guest::kFmtCoreAccDpd);
+    if (s.nunchuk) {
+        WriteVec2(a + guest::kFsStick, s.stick[0], s.stick[1]);
+        WriteVec3(a + guest::kFsAcc, s.nunchukAcc);
+        Memory::WriteFloat32(a + guest::kFsAccValue, static_cast<float>(Len(s.nunchukAcc)));
+        Memory::WriteFloat32(a + guest::kFsAccSpeed,
+                             static_cast<float>(older && older->nunchuk ? Len(s.nunchukAcc - older->nunchukAcc) : 0.0));
+    }
 
     if (mpls && s.sdkMpls) {
         for (uint32_t i=0;i<s.mpls.size();++i) Memory::Write32(a+guest::kMpls+i*4,s.mpls[i]);
@@ -710,8 +744,17 @@ void WriteRaw(uint32_t a, const Sample& s, bool mpls) {
             Memory::Write16(o + 2, 0x3FF);
         }
     }
-    Memory::Write8(a + guest::kRawDev, mpls ? guest::kDevMpls : guest::kDevCore);
+    Memory::Write8(a + guest::kRawDev, DeviceType(mpls, s.nunchuk));
     Memory::Write8(a + guest::kRawErr, 0);
+    if (s.nunchuk) {
+        // WPADFSStatus tail: 8-bit stick (centre 128) and the 10-bit Nunchuk accelerometer.
+        const auto stick = [](double v) { return static_cast<uint8_t>(std::clamp(128.0 + v * 100.0, 0.0, 255.0)); };
+        Memory::Write8(a + guest::kRawFsStickX, stick(s.stick[0]));
+        Memory::Write8(a + guest::kRawFsStickY, stick(s.stick[1]));
+        Memory::Write16(a + guest::kRawFsAcc + 0, RawAcc(-s.nunchukAcc.x));
+        Memory::Write16(a + guest::kRawFsAcc + 2, RawAcc(s.nunchukAcc.z));
+        Memory::Write16(a + guest::kRawFsAcc + 4, RawAcc(-s.nunchukAcc.y));
+    }
     if (mpls) {
         const Vec3 wii = ResortMotion::wiiGyro(s.gyro);
         const auto pitch = ResortMotion::encode(wii.x);
@@ -723,7 +766,8 @@ void WriteRaw(uint32_t a, const Sample& s, bool mpls) {
         Memory::Write16(a + guest::kRawMpYaw, yaw.value);
         Memory::Write16(a + guest::kRawMpRoll, roll.value);
     }
-    Memory::Write8(a + guest::kRawFmt, mpls ? guest::kFmtMpls : guest::kFmtCoreAccDpd);
+    Memory::Write8(a + guest::kRawFmt,
+                   mpls ? guest::kFmtMpls : s.nunchuk ? guest::kFmtFreestyleAccDpd : guest::kFmtCoreAccDpd);
 }
 
 // Run WSR's MotionPlus solver once per new sensor sample. Its work area is
@@ -770,10 +814,24 @@ uint32_t StepController(const HostInput& in) {
         }
     }
     r.recenterHeld=in.recenter;
+    r.nunchuk=in.nunchuk;
     std::deque<Sample> generated;
     const auto emit=[&](Vec3 gyro,Vec3 acc,double dt) {
         Sample s;
+        // Shake buttons on the phone page: the same wiggle as the keyboard's shake key (kShakeHz, kShakeG).
+        if(in.shake||in.nunchukShake)r.nunchukShakeTime+=dt;else r.nunchukShakeTime=0;
+        const double wiggle=std::sin(2*kPi*kShakeHz*r.nunchukShakeTime)*kShakeG;
+        if(in.shake)acc=acc+Vec3{0,wiggle,0.5*wiggle};
         s.hold=in.hold;s.gyro=gyro;s.acc=acc;s.dt=dt;
+        if(in.nunchuk) {
+            // The Nunchuk hand holds still (gravity only) unless pedalling: then it mirrors the remote hand's
+            // motion in the opposite direction, so pumping one phone reads as alternating hands.
+            const double k=1.0-std::exp(-dt/0.6);
+            r.gravity=r.gravity+(acc-r.gravity)*k;
+            s.nunchuk=true;s.stick[0]=in.stick[0];s.stick[1]=in.stick[1];
+            s.nunchukAcc=in.pedal?Vec3{0,-1,0}-(acc-r.gravity):Vec3{0,-1,0};
+            if(in.nunchukShake)s.nunchukAcc=s.nunchukAcc+Vec3{0,wiggle,0.5*wiggle};
+        }
         for(int i=0;i<3;i++) {
             const Vec3 axis=r.pointerPose.rotate(i==0?Vec3{1,0,0}:i==1?Vec3{0,1,0}:Vec3{0,0,1});
             s.R.m[0][i]=axis.x;s.R.m[1][i]=axis.y;s.R.m[2][i]=axis.z;
@@ -1005,7 +1063,7 @@ void HandleSdlEvent(const SDL_Event& ev) {
 bool Probe(uint32_t chan, uint32_t typePtr, int32_t& result) {
     if (!VirtualRemoteActive(chan)) return false;
     Announce();
-    if (typePtr) Memory::Write32(typePtr, RequestedMplsMode(chan) != 0 ? guest::kDevMpls : guest::kDevCore);
+    if (typePtr) Memory::Write32(typePtr, DeviceType(RequestedMplsMode(chan) != 0, CurrentRemote().nunchuk));
     result = 0;
     return true;
 }

@@ -26,12 +26,16 @@ static_assert(sizeof(Report) == 40);
 enum Button : uint32_t {
     kLeft = 0x0001, kRight = 0x0002, kDown = 0x0004, kUp = 0x0008, kPlus = 0x0010,
     k2 = 0x0100, k1 = 0x0200, kB = 0x0400, kA = 0x0800, kMinus = 0x1000, kHome = 0x8000,
+    kZ = 0x2000, kC = 0x4000,   // Nunchuk
 };
 
 // Extra controls the page sends next to the Wii Remote buttons.
 enum Flag : uint32_t {
     kFlagRecenter = 0x1,   // hold to recenter the pointer (like the DualSense right-stick click)
     kFlagShake = 0x2,      // on-screen shake button for phones whose accelerometer is too noisy
+    kFlagNunchuk = 0x4,    // a Nunchuk is attached (Archery, Cycling, anything that asks for one)
+    kFlagNunchukShake = 0x8,  // shake the Nunchuk hand
+    kFlagPedal = 0x10,     // the Nunchuk mirrors the phone's motion in the opposite direction (Cycling)
 };
 
 // True while a phone is linked and has sent a report recently (the page clears it on disconnect).
@@ -40,6 +44,8 @@ bool Connected() noexcept;
 uint32_t Generation() noexcept;
 uint32_t Buttons() noexcept;
 uint32_t Flags() noexcept;
+// Nunchuk stick, -1..1 each, up positive.
+void Stick(double& x, double& y) noexcept;
 
 // Calls `sink` for every report written since the previous drain, oldest first. When the ring
 // overflowed in between, the oldest reports are dropped.
@@ -56,7 +62,8 @@ struct State {
     uint32_t flags;
     uint32_t writeCount;   // written by JS after the report itself
     uint32_t readCount;    // C++ only
-    uint32_t reserved;
+    int16_t stickX;        // Nunchuk stick, -1000..1000, up positive
+    int16_t stickY;
     Report reports[kRingSize];
 };
 State& Get() noexcept;

@@ -42,11 +42,30 @@
   #tools { display: flex; gap: 12px; }
   #tools .b { flex: 1; height: 52px; font-size: 15px; }
   #hint { font-size: 13px; color: var(--muted); text-align: center; margin: 0; }
+  .switch { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+  .switch input { width: 22px; height: 22px; accent-color: var(--accent); }
+  #status .switch { margin-left: auto; color: var(--text); }
+  #nunchuk { display: none; border: 2px solid var(--btn); border-radius: 16px; padding: 10px; gap: 10px; }
+  #pad.nunchuk #nunchuk { display: flex; }
+  #nunchuk .side { display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  #stick { width: 150px; height: 150px; border-radius: 50%; background: var(--panel); border: 2px solid var(--btn);
+    position: relative; flex: none; touch-action: none; }
+  #knob { width: 64px; height: 64px; border-radius: 50%; background: var(--btn-down); position: absolute;
+    left: 43px; top: 43px; pointer-events: none; }
+  #nunchuk .cz { flex: 1; min-height: 52px; font-size: 20px; }
+  /* Compact remote while the Nunchuk panel takes the bottom of the screen. */
+  #pad.nunchuk #dpad { grid-template: repeat(3, 48px) / repeat(3, 48px); }
+  #pad.nunchuk #A { width: 88px; height: 88px; font-size: 26px; }
+  #pad.nunchuk #B { min-height: 64px; }
+  #pad.nunchuk .num { width: 56px; height: 56px; font-size: 20px; }
+  #pad.nunchuk #hint, #pad.nunchuk #tools { display: none; }
+  #top { display: flex; gap: 16px; align-items: center; justify-content: center; }
 </style>
 </head>
 <body>
 <main>
-  <div id="status"><span id="dot"></span><span id="statusText">Not connected</span></div>
+  <div id="status"><span id="dot"></span><span id="statusText">Not connected</span>
+    <label class="switch"><input type="checkbox" id="nunchukOn"> Nunchuk</label></div>
 
   <section id="pair">
     <h1>Use this phone as the Wii Remote</h1>
@@ -58,12 +77,14 @@
   </section>
 
   <section id="pad" aria-label="Wii Remote">
+    <div id="top">
     <div id="dpad">
       <span></span><button class="b" data-btn="Up" aria-label="Up">&#9650;</button><span></span>
       <button class="b" data-btn="Left" aria-label="Left">&#9664;</button><span></span><button class="b" data-btn="Right" aria-label="Right">&#9654;</button>
       <span></span><button class="b" data-btn="Down" aria-label="Down">&#9660;</button><span></span>
     </div>
     <button id="A" class="b" data-btn="A">A</button>
+    </div>
     <div class="row"><button id="B" class="b" data-btn="B">B</button></div>
     <div class="row">
       <button class="b small" data-btn="Minus" aria-label="Minus">&minus;</button>
@@ -78,7 +99,17 @@
       <button class="b" data-flag="Recenter">Hold to recenter</button>
       <button class="b" data-flag="Shake">Shake</button>
     </div>
-    <p id="hint">Point at the middle of the screen and hold "recenter" if the cursor drifts.</p>
+    <p id="hint">Point at the middle of the screen and hold "recenter" if the cursor drifts. Turn on Nunchuk
+      (top right) for Archery, Cycling and anything else that asks for one.</p>
+    <div id="nunchuk" aria-label="Nunchuk">
+      <div id="stick" aria-label="Nunchuk stick"><div id="knob"></div></div>
+      <div class="side">
+        <button class="b cz" data-btn="C">C</button>
+        <button class="b cz" data-btn="Z">Z</button>
+        <label class="switch"><input type="checkbox" id="pedalOn"> Pedal (Cycling)</label>
+        <button class="b" data-flag="NunchukShake" style="min-height:44px">Shake Nunchuk</button>
+      </div>
+    </div>
   </section>
 </main>
 <script src="phone-protocol.js"></script>

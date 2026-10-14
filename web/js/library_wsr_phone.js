@@ -5,7 +5,9 @@
 // virtual Wii Remote on its own schedule, so nothing here ever calls into wasm.
 //   Module.wsrPhone.ready()                         -> true once the runtime attached the ring
 //   Module.wsrPhone.setConnected(bool)              phone linked / gone (bumps the generation on link)
-//   Module.wsrPhone.setControls(buttons, flags)     Wii Remote button bits + kFlag* bits (web_phone.h)
+//   Module.wsrPhone.setControls(buttons, flags, stickX, stickY)
+//                                                   Wii Remote + Nunchuk button bits, kFlag* bits
+//                                                   (web_phone.h), Nunchuk stick -1..1 (up positive)
 //   Module.wsrPhone.push(timeMs, gx,gy,gz, ax,ay,az) one sensor report, SDL axes, rad/s and m/s^2
 // Module callback (optional): Module.onWsrPhoneReady() once the ring exists.
 
@@ -20,7 +22,7 @@ addToLibrary({
       Module['wsrPhone'] = {
         'ready': () => WsrPhone.state !== 0,
         'setConnected': (on) => WsrPhone.setConnected(on),
-        'setControls': (buttons, flags) => WsrPhone.setControls(buttons, flags),
+        'setControls': (buttons, flags, sx, sy) => WsrPhone.setControls(buttons, flags, sx, sy),
         'push': (t, gx, gy, gz, ax, ay, az) => WsrPhone.push(t, gx, gy, gz, ax, ay, az),
       };
     },
@@ -37,10 +39,13 @@ addToLibrary({
       return true;
     },
 
-    setControls(buttons, flags) {
+    setControls(buttons, flags, sx, sy) {
       if (!WsrPhone.state) return false;
+      const axis = (v) => Math.max(-1000, Math.min(1000, Math.round((Number(v) || 0) * 1000)));
       HEAPU32[WsrPhone.u32(12)] = buttons >>> 0;
       HEAPU32[WsrPhone.u32(16)] = flags >>> 0;
+      HEAP16[(WsrPhone.state + 28) >> 1] = axis(sx);
+      HEAP16[(WsrPhone.state + 30) >> 1] = axis(sy);
       return true;
     },
 

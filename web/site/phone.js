@@ -23,6 +23,7 @@
   let lastAcc = [0, 0, 9.81];
   let lastSent = 0;
   let wakeLock = null;
+  let stick = [0, 0];          // Nunchuk stick, -1..1, up positive
 
   // ------------------------------------------------------------------------------------------ UI
   function setStatus(text, ok) {
@@ -54,6 +55,7 @@
     try { localStorage.setItem('wsrPhoneCode', room); } catch (_) { /* private mode */ }
     $('pair').style.display = 'none';
     $('pad').classList.add('on');
+    applyNunchuk();
     goFullscreen();
     connect();
   });
@@ -86,6 +88,59 @@
   }
   bindButtons();
 
+  // ------------------------------------------------------------------------------------------ Nunchuk
+  const nunchukOn = $('nunchukOn');
+  const pedalOn = $('pedalOn');
+  try {
+    nunchukOn.checked = localStorage.getItem('wsrNunchuk') === '1';
+    pedalOn.checked = localStorage.getItem('wsrPedal') === '1';
+  } catch (_) { /* private mode */ }
+
+  function applyNunchuk() {
+    const on = nunchukOn.checked;
+    $('pad').classList.toggle('nunchuk', on);
+    flags = on ? flags | P.FLAGS.Nunchuk : flags & ~(P.FLAGS.Nunchuk | P.FLAGS.NunchukShake);
+    flags = on && pedalOn.checked ? flags | P.FLAGS.Pedal : flags & ~P.FLAGS.Pedal;
+    if (!on) { buttons &= ~(P.BUTTONS.C | P.BUTTONS.Z); setStick(0, 0); }
+    try {
+      localStorage.setItem('wsrNunchuk', on ? '1' : '0');
+      localStorage.setItem('wsrPedal', pedalOn.checked ? '1' : '0');
+    } catch (_) { /* private mode */ }
+    send();
+  }
+  nunchukOn.addEventListener('change', applyNunchuk);
+  pedalOn.addEventListener('change', applyNunchuk);
+
+  const stickEl = $('stick');
+  const knob = $('knob');
+  let stickPointer = null;
+  function setStick(x, y) {
+    stick = [x, y];
+    const travel = (stickEl.clientWidth - knob.clientWidth) / 2 || 43;
+    knob.style.transform = `translate(${x * travel}px, ${-y * travel}px)`;
+  }
+  function stickFrom(e) {
+    const r = stickEl.getBoundingClientRect();
+    const travel = (r.width - knob.clientWidth) / 2;
+    let dx = (e.clientX - (r.left + r.width / 2)) / travel;
+    let dy = (e.clientY - (r.top + r.height / 2)) / travel;
+    const len = Math.hypot(dx, dy);
+    if (len > 1) { dx /= len; dy /= len; }
+    setStick(dx, -dy);
+    send();
+  }
+  stickEl.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try { stickEl.setPointerCapture(e.pointerId); } catch (_) { /* fine without capture */ }
+    stickPointer = e.pointerId;
+    stickFrom(e);
+  });
+  stickEl.addEventListener('pointermove', (e) => { if (e.pointerId === stickPointer) stickFrom(e); });
+  const stickRelease = (e) => { if (e.pointerId === stickPointer) { stickPointer = null; setStick(0, 0); send(); } };
+  stickEl.addEventListener('pointerup', stickRelease);
+  stickEl.addEventListener('pointercancel', stickRelease);
+  stickEl.addEventListener('lostpointercapture', stickRelease);
+
   async function goFullscreen() {
     try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch (_) { /* iOS */ }
     try { await screen.orientation.lock('portrait'); } catch (_) { /* not allowed everywhere */ }
@@ -97,7 +152,12 @@
   }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && $('pad').classList.contains('on') && !wakeLock) keepAwake();
-    if (document.visibilityState === 'hidden') { buttons = 0; flags = 0; send(); }
+    if (document.visibilityState === 'hidden') {
+      buttons = 0;
+      flags &= P.FLAGS.Nunchuk | P.FLAGS.Pedal;   // keep the attachment, drop held controls
+      setStick(0, 0);
+      send();
+    }
   });
 
   // ------------------------------------------------------------------------------------------ sensors
@@ -135,7 +195,8 @@
 
   // ------------------------------------------------------------------------------------------ transport
   function send(timeMs) {
-    const packet = P.encode(seq++, buttons, flags, timeMs === undefined ? lastSent || performance.now() : timeMs, lastGyro, lastAcc);
+    const packet = P.encode(seq++, buttons, flags, timeMs === undefined ? lastSent || performance.now() : timeMs,
+      lastGyro, lastAcc, stick);
     // Packets without a fresh sensor time reuse the previous one, so the runtime only takes their buttons.
     if (timeMs !== undefined) lastSent = timeMs;
     if (channel && channel.readyState === 'open') {

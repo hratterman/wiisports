@@ -168,7 +168,9 @@ step_disc() {
     say "Checking the disc"
     local img; img=$(disc_image)
     info "image: $img"
-    nodtool info "$img" 2>/dev/null | grep -q 'Game ID: RZTP01' \
+    # Captured first: with pipefail, grep -q closing the pipe early could fail a good disc.
+    local disc_info; disc_info=$(nodtool info "$img" 2>/dev/null || true)
+    [[ "$disc_info" == *"Game ID: RZTP01"* ]] \
         || die "this is not PAL Wii Sports Resort (RZTP01). The standalone disc is needed, not the Wii Sports + Wii Sports Resort bundle."
     info "verifying the whole image against Redump (a minute or two)"
     nodtool verify "$img" >"$logs/verify.log" 2>&1 || true
@@ -265,7 +267,9 @@ step_verify() {
             && info "https://$WSR_HOSTNAME: ok (asks for the Access login)" \
             || die "https://$WSR_HOSTNAME answered $code${loc:+ -> $loc}, expected a redirect to the Cloudflare Access login. See $logs/$LABEL_TUNNEL.log"
     fi
-    say "Done. Open https://${WSR_HOSTNAME:-127.0.0.1:$WSR_PORT} in Chrome or Edge; on the phone open /phone.html on the same site."
+    local site_url="http://127.0.0.1:$WSR_PORT"
+    [[ -n "${WSR_HOSTNAME:-}" ]] && site_url="https://$WSR_HOSTNAME"
+    say "Done. Open $site_url in Chrome or Edge; on the phone open $site_url/phone.html"
 }
 
 step_status() {

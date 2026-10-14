@@ -10,6 +10,7 @@
 // edge is the remote's tip. Gyro is rad/s, acceleration is m/s^2 support force (+9.81 on the axis
 // pointing up when still), as SDL reports both.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace WebPhone {
@@ -47,6 +48,19 @@ uint32_t Flags() noexcept;
 // Nunchuk stick, -1..1 each, up positive.
 void Stick(double& x, double& y) noexcept;
 
+// What the virtual remote last handed the game, for the page's debug readout (Module.wsrPhone.debug()).
+struct DebugSample {
+    float posX, posY;        // pointer, -1..1 (valid only when pointerValid)
+    float roll;              // radians
+    float gyro[3];           // body rad/s after bias correction
+    float acc[3];            // KPAD g
+    float stick[2];
+    float nunchukAcc[3];
+    uint32_t hold;
+    uint8_t pointerValid, nunchuk, devType, mplsMode;
+};
+void NoteSample(const DebugSample& sample) noexcept;
+
 // Calls `sink` for every report written since the previous drain, oldest first. When the ring
 // overflowed in between, the oldest reports are dropped.
 template <typename Sink>
@@ -64,9 +78,13 @@ struct State {
     uint32_t readCount;    // C++ only
     int16_t stickX;        // Nunchuk stick, -1000..1000, up positive
     int16_t stickY;
+    DebugSample debug;     // offset 32, written by C++ only
     Report reports[kRingSize];
 };
 State& Get() noexcept;
+// web/js/library_wsr_phone.js hardcodes these.
+static_assert(sizeof(DebugSample) == 64);
+static_assert(offsetof(State, stickX) == 28 && offsetof(State, debug) == 32);
 } // namespace detail
 
 template <typename Sink>

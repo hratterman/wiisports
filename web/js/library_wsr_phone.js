@@ -24,6 +24,7 @@ addToLibrary({
         'setConnected': (on) => WsrPhone.setConnected(on),
         'setControls': (buttons, flags, sx, sy) => WsrPhone.setControls(buttons, flags, sx, sy),
         'push': (t, gx, gy, gz, ax, ay, az) => WsrPhone.push(t, gx, gy, gz, ax, ay, az),
+        'debug': () => WsrPhone.debug(),
       };
     },
 
@@ -47,6 +48,18 @@ addToLibrary({
       HEAP16[(WsrPhone.state + 28) >> 1] = axis(sx);
       HEAP16[(WsrPhone.state + 30) >> 1] = axis(sy);
       return true;
+    },
+
+    // web_phone.h DebugSample at offset 32: what the virtual remote last handed the game.
+    debug() {
+      if (!WsrPhone.state) return null;
+      const f = (o) => HEAPF32[(WsrPhone.state + 32 + o) >> 2];
+      const b = (o) => HEAPU8[WsrPhone.state + 32 + o];
+      return {
+        pos: [f(0), f(4)], roll: f(8), gyro: [f(12), f(16), f(20)], acc: [f(24), f(28), f(32)],
+        stick: [f(36), f(40)], nunchukAcc: [f(44), f(48), f(52)], hold: HEAPU32[(WsrPhone.state + 32 + 56) >> 2],
+        pointerValid: b(60) !== 0, nunchuk: b(61) !== 0, devType: b(62), mplsMode: b(63),
+      };
     },
 
     // Report: u64 timeNs, f32 gyro[3], f32 acc[3], u32 pad (40 bytes).

@@ -871,6 +871,21 @@ uint32_t StepController(const HostInput& in) {
     // No new sensor report means no new angular motion. Reusing the last
     // nonzero rate here causes the sword/pointer to keep rotating after a swing.
     if(generated.empty())emit({},in.accValid?in.acc:r.sensorAcc,1.0/kSampleHz);
+#if defined(__EMSCRIPTEN__)
+    {
+        const Sample& s=generated.back();
+        WebPhone::DebugSample d{};
+        d.posX=static_cast<float>(s.posX);d.posY=static_cast<float>(s.posY);d.roll=static_cast<float>(s.roll);
+        d.gyro[0]=static_cast<float>(s.gyro.x);d.gyro[1]=static_cast<float>(s.gyro.y);d.gyro[2]=static_cast<float>(s.gyro.z);
+        d.acc[0]=static_cast<float>(s.acc.x);d.acc[1]=static_cast<float>(s.acc.y);d.acc[2]=static_cast<float>(s.acc.z);
+        d.stick[0]=static_cast<float>(s.stick[0]);d.stick[1]=static_cast<float>(s.stick[1]);
+        d.nunchukAcc[0]=static_cast<float>(s.nunchukAcc.x);d.nunchukAcc[1]=static_cast<float>(s.nunchukAcc.y);
+        d.nunchukAcc[2]=static_cast<float>(s.nunchukAcc.z);
+        d.hold=s.hold;d.pointerValid=s.pointerValid?1:0;d.nunchuk=s.nunchuk?1:0;
+        d.mplsMode=RequestedMplsMode(0);d.devType=DeviceType(d.mplsMode!=0,s.nunchuk);
+        WebPhone::NoteSample(d);
+    }
+#endif
     const uint32_t n=static_cast<uint32_t>(generated.size());
     for(uint32_t i=0;i<n;i++)r.recent[i]=generated[n-1-i];
     r.recentCount=n;

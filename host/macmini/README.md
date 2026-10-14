@@ -103,7 +103,7 @@ because it holds the tunnel token.
 ## Step 5: Run the setup
 
 ```sh
-host/macmini/setup.sh
+bash host/macmini/setup.sh
 ```
 
 It prints one `==>` line per step. Expect, in order:
@@ -135,8 +135,8 @@ If you used a Drive link, tell Henry he can set it back to Restricted now.
 ## Step 6: Confirm it is up
 
 ```sh
-host/macmini/setup.sh status
-host/macmini/setup.sh verify
+bash host/macmini/setup.sh status
+bash host/macmini/setup.sh verify
 ```
 
 `status` should show both `com.wiisports.host` and `com.wiisports.tunnel` as `running`, and "local
@@ -193,18 +193,18 @@ Known errors and their fixes:
 | `the build failed` | Send the build log (above). Do not try to fix compiler errors yourself. |
 | `launchctl could not load` | Usually nobody is logged in at the Mac. Log in at the Mac (Step 2), rerun. |
 | `no tunnel token` | `WSR_TUNNEL_TOKEN` is empty in `wiisports.env`. Get it from Henry. |
-| `the tunnel connector has not registered` | Usually a mistyped token. Check `WSR_TUNNEL_TOKEN`, then `host/macmini/setup.sh cloudflare && host/macmini/setup.sh verify`. |
-| `answered 502` or `530` | The tunnel is up but the server is not: `host/macmini/setup.sh serve`, then `verify`. |
+| `the tunnel connector has not registered` | Usually a mistyped token. Check `WSR_TUNNEL_TOKEN`, then `bash host/macmini/setup.sh cloudflare && bash host/macmini/setup.sh verify`. |
+| `answered 502` or `530` | The tunnel is up but the server is not: `bash host/macmini/setup.sh serve`, then `verify`. |
 
 ## Day to day
 
 | Task | Command (from `~/wiisports`) |
 | --- | --- |
-| Is it up? | `host/macmini/setup.sh status` |
-| Full check | `host/macmini/setup.sh verify` |
-| Stop serving | `host/macmini/setup.sh stop` |
-| Start again | `host/macmini/setup.sh serve && host/macmini/setup.sh cloudflare` |
-| Update to new code from Henry | `git pull && host/macmini/setup.sh` |
+| Is it up? | `bash host/macmini/setup.sh status` |
+| Full check | `bash host/macmini/setup.sh verify` |
+| Stop serving | `bash host/macmini/setup.sh stop` |
+| Start again | `bash host/macmini/setup.sh serve && bash host/macmini/setup.sh cloudflare` |
+| Update to new code from Henry | `git pull && bash host/macmini/setup.sh` |
 | Logs | `ls ~/wiisports-host/logs/` |
 
 The agents restart the server and tunnel by themselves if they crash and start them at login.
@@ -224,7 +224,7 @@ The agents restart the server and tunnel by themselves if they crash and start t
 Only if Henry asks:
 
 ```sh
-cd ~/wiisports && host/macmini/setup.sh stop
+cd ~/wiisports && bash host/macmini/setup.sh stop
 rm -f ~/Library/LaunchAgents/com.wiisports.host.plist ~/Library/LaunchAgents/com.wiisports.tunnel.plist
 rm -rf ~/wiisports-host
 ```
@@ -233,6 +233,6 @@ Then start again at Step 5.
 
 To recreate the Cloudflare side on another account or from scratch (Henry's call, not routine): put
 an API token in `CLOUDFLARE_API_TOKEN`, the account ID in `CLOUDFLARE_ACCOUNT_ID`, the allowed emails
-in `WSR_ALLOW_EMAILS`, and run `host/macmini/setup.sh cloudflare`. The token needs Account:
+in `WSR_ALLOW_EMAILS`, and run `bash host/macmini/setup.sh cloudflare`. The token needs Account:
 Cloudflare Tunnel Edit, Account: Access: Apps and Policies Edit, Account: Access: Organizations,
 Identity Providers, and Groups Edit, Zone: DNS Edit and Zone: Zone Read for the zone.

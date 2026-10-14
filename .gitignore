@@ -1,0 +1,103 @@
+/generated/
+/Assets/
+/assets/
+/PulsarPacks/
+*.dol
+*.rel
+*.szs
+*.arc
+*.brres
+*.thp
+*.bmg
+*.brsar
+*.breff
+*.u8
+*.carc
+*.iso
+*.rvz
+*.wbfs
+*.nkit
+*.ciso
+*.gcm
+*.wad
+Code.pul
+
+# Build output
+/build/
+/build-*/
+/native-build/
+/native-build-macos/
+/local-products/
+/dist/
+/out/
+[Bb]in/
+[Oo]bj/
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+*.ilk
+*.map
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+
+
+# .NET
+/translator/TestResults/
+**/TestResults/
+*.user
+*.suo
+*.userprefs
+project.lock.json
+.packages/
+
+# Launcher artifacts
+/Launcher/artifacts/
+/Launcher/dist/
+/Launcher/WiiCompiled-Setup.exe
+*.exe
+*.msi
+
+
+# Local tooling and editors
+/.vs/
+/.vscode/
+/.idea/
+/tools/
+/TEMP/
+/tmp/
+/test_output/
+*.log
+output.txt
+
+# Operating System
+.DS_Store
+
+# Web port: build output and local game data (never commit game files or translated code)
+/web/build/
+/web/dist/
+# Self-signed TLS certificate and key made by web/serve.py --https (private key: never commit)
+/web/.certs/
+# Host drop folder: everything in it stays local except the README.
+/web/game/*
+!/web/game/README.md
+/game/
+*.wasm
+DATA/
+__pycache__/
+*.pyc
+
+# Self-signed HTTPS certificate and private key made by serve.py --https / start-server.bat --lan
+/web/.certs/
+*.pem
+*.key
+
+# wiisports: game data never goes in this repo
+*.wia
+*.gcz
+*.tgc
+*.bnr
+/disc/
+/work/

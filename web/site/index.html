@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0d12">
+<title>WebCompiled</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d12'/%3E%3Cpath d='M7 10l4 12 5-9 5 9 4-12' fill='none' stroke='%234da3ff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="stage">
+  <!-- SDL / aurora render into this canvas. Emscripten finds it via Module.canvas. -->
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+  <div id="toolbar" class="toolbar" hidden>
+    <button type="button" id="btn-help" class="chip" aria-haspopup="dialog" aria-controls="help" title="Controls (? or H)">Controls</button>
+    <button type="button" id="btn-touch" class="chip" aria-pressed="false" title="Show or hide the on-screen touch controls">Touch</button>
+    <button type="button" id="btn-fullscreen" class="chip" title="Toggle fullscreen">Fullscreen</button>
+    <button type="button" id="btn-settings" class="chip" title="Game settings bar (F10)">Settings</button>
+  </div>
+
+  <!-- Input debug view: raw navigator.getGamepads() next to what the game's PADRead returns -->
+  <section id="input-debug" class="debug-panel" aria-label="Input debug view" hidden>
+    <div class="debug-head">
+      <strong>Input debug</strong>
+      <button type="button" id="btn-debug-close" class="chip">Close</button>
+    </div>
+    <div class="debug-cols">
+      <div><h4>Browser (navigator.getGamepads)</h4><pre id="debug-raw">No gamepad.</pre></div>
+      <div><h4>Game (PADRead, per player)</h4><pre id="debug-game">The game has not read input yet.</pre></div>
+    </div>
+  </section>
+
+  <!-- Loading / compatibility / click-to-start -->
+  <section id="loader" class="overlay" aria-live="polite">
+    <div class="panel">
+      <h1>WebCompiled</h1>
+      <p class="tagline">Mario Kart Wii, statically recompiled to WebAssembly and WebGPU.</p>
+
+      <ul id="checks" class="checks" hidden></ul>
+
+      <div id="compat-error" class="notice notice-error" role="alert" hidden></div>
+
+      <!-- Shown only when products.json lists more than one product (base game, Retro Rewind, ...) -->
+      <div id="product-area" hidden>
+        <h2 id="product-heading" class="product-heading">Choose what to play</h2>
+        <div id="product-list" class="products" role="group" aria-labelledby="product-heading"></div>
+      </div>
+
+      <div id="progress-area">
+        <div id="progress" class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Loading progress">
+          <div id="progress-fill" class="bar-fill"></div>
+        </div>
+        <p id="status" class="status">Checking your browser…</p>
+      </div>
+
+      <button type="button" id="btn-start" class="primary" hidden>Click to start</button>
+      <p id="start-hint" class="hint" hidden>Audio and input begin after this click (browser autoplay policy).</p>
+      <button type="button" id="btn-change-product" class="linklike" hidden>Choose a different game</button>
+    </div>
+  </section>
+
+  <!-- Controls help -->
+  <section id="help" class="overlay overlay-modal" role="dialog" aria-modal="true" aria-labelledby="help-title" hidden>
+    <div class="panel panel-wide">
+      <div class="panel-head">
+        <h2 id="help-title">Controls</h2>
+        <button type="button" id="btn-help-close" class="chip" aria-label="Close controls">Close</button>
+      </div>
+      <p class="hint">The keyboard and the first gamepad both control player 1, together. More gamepads join as players 2 to 4.</p>
+      <h3>Keyboard (player 1)</h3>
+      <div class="table-wrap">
+        <table id="controls-table">
+          <thead><tr><th scope="col">Key</th><th scope="col">GameCube</th><th scope="col">In the game</th></tr></thead>
+          <tbody id="keyboard-rows"></tbody>
+        </table>
+      </div>
+      <p id="keyboard-source" class="hint">Default layout.</p>
+      <h3>Gamepads</h3>
+      <p>Controllers work through the browser Gamepad API (Xbox, PlayStation, Switch Pro and other standard pads). Connect one and press any button so the browser exposes it to the page.</p>
+      <ul id="pad-list" class="pad-list"><li id="gamepad-status" class="hint">No gamepad detected.</li></ul>
+      <div class="table-wrap">
+        <table id="pad-layout-table">
+          <thead><tr><th scope="col">GameCube</th><th scope="col">Xbox</th><th scope="col">PlayStation</th><th scope="col">Switch Pro</th></tr></thead>
+          <tbody id="pad-layout-rows"></tbody>
+        </table>
+      </div>
+      <div id="touch-help">
+        <h3>Touch screens</h3>
+        <p>On a phone or tablet the game shows on-screen controls for player 1: put your thumb anywhere in the lower left and drag to steer, and use the buttons on the right. Slide your thumb from one button to another to switch. <strong>Auto A</strong> at the top keeps A held so you accelerate without holding a thumb on it; tap it again to stop. <strong>☰</strong> brings up the page buttons (this panel, Fullscreen, the game's Settings). Turn the device sideways for the biggest picture.</p>
+        <div class="touch-settings">
+          <label for="touch-show">Show</label>
+          <select id="touch-show">
+            <option value="auto">When the screen is touched</option>
+            <option value="always">Always</option>
+            <option value="never">Never</option>
+          </select>
+          <label for="touch-size">Size</label>
+          <input type="range" id="touch-size" min="70" max="140" step="5">
+          <label for="touch-opacity">Opacity</label>
+          <input type="range" id="touch-opacity" min="20" max="100" step="5">
+        </div>
+        <label class="toggle"><input type="checkbox" id="touch-haptics"> Vibrate on button presses and when the game rumbles (on devices that support it)</label>
+        <label class="toggle"><input type="checkbox" id="touch-fullscreen"> Go fullscreen in landscape when the game starts from a touch screen</label>
+      </div>
+      <h3 id="rebinding-heading">Rebinding</h3>
+      <p><kbd>F10</kbd> (or the Settings button) opens the game's settings bar: key and button mapping, which pad is which player, vibration. Changes are saved in this browser.</p>
+      <label class="toggle"><input type="checkbox" id="input-debug-toggle"> Show the input debug view (what the browser reports next to what the game receives)</label>
+      <h3>Page shortcuts</h3>
+      <p><kbd>?</kbd> or <kbd>H</kbd> toggles this panel, <kbd>Esc</kbd> closes it. Use the Fullscreen button for fullscreen.</p>
+    </div>
+  </section>
+
+  <!-- Error overlay -->
+  <section id="error" class="overlay overlay-modal" role="alertdialog" aria-modal="true" aria-labelledby="error-title" hidden>
+    <div class="panel panel-wide">
+      <h2 id="error-title">Something went wrong</h2>
+      <p id="error-summary" class="notice notice-error"></p>
+      <p class="hint">The details below include the error and the most recent console output. Copy them when reporting the problem.</p>
+      <textarea id="error-details" class="details" readonly spellcheck="false" aria-label="Error details"></textarea>
+      <div class="row">
+        <button type="button" id="btn-copy" class="primary">Copy details</button>
+        <button type="button" id="btn-reload" class="chip">Reload</button>
+        <button type="button" id="btn-dismiss" class="chip">Dismiss</button>
+        <span id="copy-result" class="hint" role="status"></span>
+      </div>
+    </div>
+  </section>
+
+  <noscript><div class="overlay"><div class="panel"><h1>WebCompiled</h1><p>This page needs JavaScript, WebAssembly and WebGPU.</p></div></div></noscript>
+</main>
+<script src="touch.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

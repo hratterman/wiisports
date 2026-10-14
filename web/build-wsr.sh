@@ -10,6 +10,9 @@
 # deployment (web/cloudflare, docs/hosting.md) can serve. Nothing derived from the disc is ever
 # written inside the repo except under work/ and web/dist/, both git-ignored.
 #
+# Extra CMake arguments go in WSR_CMAKE_ARGS (e.g. -DFETCHCONTENT_SOURCE_DIR_FMT=/path to use local
+# dependency sources instead of downloading them).
+#
 # Needs: Emscripten 6.0.12 (emcc on PATH or EMSDK set), .NET 8 SDK, CMake >= 3.25, Ninja, Python 3,
 # and nodtool (https://github.com/encounter/nod/releases, v2.0.0-alpha.10) unless the input is a folder.
 set -euo pipefail
@@ -137,7 +140,8 @@ emcmake cmake -S "$workspace/runtime" -B "$cmake_build" -G Ninja \
     -DMKW_GENERATED_ROOT="$work" \
     -DMKW_TRANSLATED_SHARD_MANIFEST="$generated/build_shards/shards.cmake" \
     -DMKW_PLATFORM_WEB_DIST="$out_dir" \
-    -DMKW_TRANSLATED_COMPILE_JOBS="$jobs"
+    -DMKW_TRANSLATED_COMPILE_JOBS="$jobs" \
+    ${WSR_CMAKE_ARGS:-}
 
 step "Compiling to WebAssembly (the long step)"
 cmake --build "$cmake_build" --target "$TARGET" --parallel "$jobs"

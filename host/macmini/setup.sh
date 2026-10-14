@@ -149,6 +149,10 @@ disc_image() {
     info "downloading the disc from Google Drive (share it as 'Anyone with the link' while this runs)" >&2
     curl -fL --retry 3 --progress-bar -o "$disc_dir/download.part" \
         "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t" >&2 || die "Drive download failed"
+    if [[ "$(head -c 1 "$disc_dir/download.part")" == "<" ]]; then
+        rm -f "$disc_dir/download.part"
+        die "Google Drive sent a web page instead of the file: share it as 'Anyone with the link' (or copy the RVZ to this Mac and set WSR_DISC), then rerun"
+    fi
     if [[ "$(head -c 2 "$disc_dir/download.part")" == "PK" ]]; then
         (cd "$disc_dir" && unzip -oq download.part && rm -f download.part)
         local found; found=$(find "$disc_dir" -maxdepth 2 \( -iname '*.rvz' -o -iname '*.iso' -o -iname '*.wbfs' \) | head -n1)
@@ -242,6 +246,14 @@ step_verify() {
     curl -fsS "http://127.0.0.1:$WSR_PORT/healthz" >/dev/null && info "local server: ok" || die "local server is not answering"
     curl -fsS -o /dev/null "http://127.0.0.1:$WSR_PORT/products.json" && info "site files: ok" || die "site files missing"
     if [[ -n "${WSR_HOSTNAME:-}" ]]; then
+        # The Access login answers even with no connector running, so check the connector itself.
+        local registered=0
+        for _ in $(seq 1 30); do
+            grep -q 'Registered tunnel connection' "$logs/$LABEL_TUNNEL.log" 2>/dev/null && { registered=1; break; }
+            sleep 2
+        done
+        ((registered)) && info "tunnel connector: registered with Cloudflare" \
+            || die "the tunnel connector has not registered; see $logs/$LABEL_TUNNEL.log (a wrong WSR_TUNNEL_TOKEN shows up there)"
         local code loc=""
         for _ in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://$WSR_HOSTNAME/" || true)

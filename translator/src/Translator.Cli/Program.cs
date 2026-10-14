@@ -519,6 +519,14 @@ int RunTranslateRecursive(string[] argsTail)
                     next => ShouldSkip(next) || !batchAddresses.Add(next.addr));
                 foreach (var next in candidates)
                 {
+                    if (!image.Value.Contains(next.addr, sizeof(uint)))
+                    {
+                        // Outside the loaded image (e.g. the SDK debugger stub's `bla 0x60`): nothing to
+                        // translate; the call site stays a runtime dispatch.
+                        Console.WriteLine($"[translator] Skipping call target 0x{next.addr:X8}: outside the loaded image.");
+                        translated.Add(next.addr);
+                        continue;
+                    }
                     var fallbackName = $"func_{next.addr:X8}";
                     var name = ResolveFunctionName(next.addr, preferred: null, fallbackName);
                     // Every queued item is a translator-discovered function start.
@@ -3044,7 +3052,11 @@ int PruneStaleGeneratedFiles(
 
 IEnumerable<uint> DiscoverTranslationTargets(FunctionTranslationResult result)
 {
-    return DiscoverTranslationTargetsCore(result.Instructions, result.LinearIr);
+    // Targets outside the loaded image (e.g. the SDK's `bla 0x60` debugger stub, reached as a "callback"
+    // because OSInit passes its address to memcpy) can never be translated; the call site stays a
+    // runtime dispatch instead of aborting the whole run.
+    return DiscoverTranslationTargetsCore(result.Instructions, result.LinearIr)
+        .Where(target => image.Value.Contains(target, sizeof(uint)));
 }
 
 IEnumerable<uint> DiscoverDiscoveryTranslationTargets(FunctionDiscoveryResult result)

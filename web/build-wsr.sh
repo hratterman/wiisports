@@ -69,7 +69,8 @@ python_bin=${PYTHON:-python3}
 command -v "$python_bin" >/dev/null 2>&1 || fail "Python 3 not found"
 if ((jobs <= 0)); then
     cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-    mem_gib=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 8388608) / 1048576 ))
+    if [[ -r /proc/meminfo ]]; then mem_gib=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1048576 ))
+    else mem_gib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1073741824 )); fi
     jobs=$(( cpus < mem_gib / 2 ? cpus : mem_gib / 2 )); ((jobs >= 1)) || jobs=1
 fi
 info "emcc $emver, $jobs parallel jobs"

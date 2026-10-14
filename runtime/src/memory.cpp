@@ -765,10 +765,49 @@ uint8_t* Memory::GetPointer(uint32_t addr) {
     return GetPointer(addr, 1);
 }
 
+#if defined(__EMSCRIPTEN__)
+namespace {
+// [web] Native builds commit a zero-filled 64 KiB block when guest code touches an unmapped,
+// non-MMIO address (guest_flat_memory.cpp, fault case 4) and keep running. Wii Sports Resort
+// depends on that: its skydive reads the EFB depth buffer through the CPU's EFB window at
+// 0xC8000000, which no runtime maps, and natively gets zero. The web build's checked path would
+// end the game there instead, so scalar accesses get the same zero-filled block here, reported
+// once per block. MMIO and bulk accesses still fail loudly.
+uint8_t* StrayScalarPointer(uint32_t addr, size_t length) {
+    constexpr uint32_t kBlockSize = 64u * 1024u;
+    if (length > MemoryInline::kMaxFastScalarSize || MemoryInline::IsMmioAddress(addr)) {
+        return nullptr;
+    }
+    static std::mutex mutex;
+    static std::unordered_map<uint32_t, std::unique_ptr<uint8_t[]>> blocks;
+    const uint32_t index = addr / kBlockSize;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& block = blocks[index];
+    if (!block) {
+        // Padding past the end keeps an access that straddles the block boundary inside the buffer.
+        block = std::make_unique<uint8_t[]>(kBlockSize + MemoryInline::kMaxFastScalarSize);
+        RT_LOG(RT_TAG_MEMORY) << "WARNING unmapped guest touch at 0x" << std::hex << std::uppercase << addr
+                              << " (active=0x" << RecompMod::CurrentTranslatedExecutionAddress()
+                              << "): zero-filled block 0x" << index * kBlockSize << "-0x"
+                              << (index * kBlockSize + kBlockSize - 1) << std::dec << std::nouppercase
+                              << ", as native builds do" << std::endl;
+    }
+    return block.get() + (addr - index * kBlockSize);
+}
+} // namespace
+#endif
+
 uint8_t* Memory::GetPointer(uint32_t addr, size_t length) {
     if (auto* ptr = MemoryInline::GetPointerFast(addr, length)) {
         return ptr;
     }
+#if defined(__EMSCRIPTEN__)
+    if (!TryResolveRegion(addr, length)) {
+        if (uint8_t* stray = StrayScalarPointer(addr, length)) {
+            return stray;
+        }
+    }
+#endif
     auto& region = ResolveRegion(addr, length);
     auto offset = static_cast<size_t>(addr - region.config.baseAddress);
     return region.storagePtr + offset;

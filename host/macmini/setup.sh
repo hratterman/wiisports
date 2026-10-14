@@ -221,9 +221,10 @@ step_serve() {
 
 step_cloudflare() {
     say "Publishing https://$WSR_HOSTNAME through a Cloudflare Tunnel with an Access login"
-    [[ -n "${WSR_HOSTNAME:-}" && -n "${WSR_ALLOW_EMAILS:-}" ]] || die "set WSR_HOSTNAME and WSR_ALLOW_EMAILS in $env_file"
+    [[ -n "${WSR_HOSTNAME:-}" ]] || die "set WSR_HOSTNAME in $env_file"
     local token_file=$WSR_HOME/tunnel.token
     if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+        [[ -n "${WSR_ALLOW_EMAILS:-}" ]] || die "set WSR_ALLOW_EMAILS in $env_file (who may log in)"
         local allow=(); for e in ${WSR_ALLOW_EMAILS//,/ }; do allow+=(--allow "$e"); done
         CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID} \
             python3 "$repo/host/cloudflare_setup.py" --hostname "$WSR_HOSTNAME" "${allow[@]}" \

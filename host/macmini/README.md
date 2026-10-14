@@ -23,25 +23,28 @@ system-wide and no `sudo` is needed.
 
 Every downloaded tool is pinned to an exact version and checked against a SHA-256 in `setup.sh`.
 
-## Before you start (once, by Henry, about 10 minutes)
+## Before you start
 
-1. **Zero Trust on the Cloudflare account.** Cloudflare dashboard, then Zero Trust. If it asks, pick a
-   team name and the Free plan. This is what shows the email-code login.
-2. **An API token.** Cloudflare dashboard, then My Profile, API Tokens, Create Token, Create Custom
-   Token, with these permissions:
+The Cloudflare side is already set up for `wii.henryratterman.com`: the tunnel `wiisports`, its DNS
+record, and an Access login that only lets in the allowed email addresses. Jamie needs from Henry:
 
-   | Scope | Permission | Level |
-   | --- | --- | --- |
-   | Account | Cloudflare Tunnel | Edit |
-   | Account | Access: Apps and Policies | Edit |
-   | Account | Access: Organizations, Identity Providers, and Groups | Edit |
-   | Zone (henryratterman.com) | DNS | Edit |
-   | Zone (henryratterman.com) | Zone | Read |
-
-   Copy the token. Also copy the **Account ID** (dashboard home, right-hand column, or the URL after
-   `dash.cloudflare.com/`).
-3. **The disc.** The Wii Sports Resort RVZ (PAL, `RZTP01`, Rev 1) either copied onto the Mac mini, or in
+1. **The tunnel token** (a long string starting with `ey`). It goes in `WSR_TUNNEL_TOKEN`. If it is
+   lost: Cloudflare dashboard, Zero Trust, Networks, Tunnels, `wiisports`, Configure; the install
+   command shown there ends with the token.
+2. **The disc.** The Wii Sports Resort RVZ (PAL, `RZTP01`, Rev 1) either copied onto the Mac mini, or in
    Google Drive shared as "Anyone with the link" until setup has downloaded it.
+
+To redo the Cloudflare side from scratch instead (or on another account), put an API token in
+`CLOUDFLARE_API_TOKEN` and the account ID in `CLOUDFLARE_ACCOUNT_ID`; `setup.sh cloudflare` then runs
+`host/cloudflare_setup.py`. The token needs:
+
+| Scope | Permission | Level |
+| --- | --- | --- |
+| Account | Cloudflare Tunnel | Edit |
+| Account | Access: Apps and Policies | Edit |
+| Account | Access: Organizations, Identity Providers, and Groups | Edit |
+| Zone (henryratterman.com) | DNS | Edit |
+| Zone (henryratterman.com) | Zone | Read |
 
 ## Steps (Jamie)
 
@@ -69,9 +72,9 @@ Every downloaded tool is pinned to an exact version and checked against a SHA-25
    open -e host/macmini/wiisports.env
    ```
 
-   Set `WSR_DISC` (path to the RVZ on this Mac) or `WSR_DISC_URL` (the Drive link), `WSR_ALLOW_EMAILS`
-   (who may log in, comma-separated), `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. Leave
-   `WSR_HOSTNAME` as `wii.henryratterman.com`.
+   Set `WSR_DISC` (path to the RVZ on this Mac) or `WSR_DISC_URL` (the Drive link), and
+   `WSR_TUNNEL_TOKEN` (from Henry). Leave `WSR_HOSTNAME` as `wii.henryratterman.com` and the
+   `CLOUDFLARE_*` lines empty.
 
 4. Keep the Mac awake and logged in, so the server stays up:
 
@@ -110,7 +113,7 @@ and tap Connect.
 | Stop serving | `host/macmini/setup.sh stop` |
 | Start again | `host/macmini/setup.sh serve && host/macmini/setup.sh cloudflare` |
 | Update after new code | `git pull && host/macmini/setup.sh` |
-| Add a person | add the email to `WSR_ALLOW_EMAILS`, then `host/macmini/setup.sh cloudflare` |
+| Add a person | Cloudflare dashboard, Zero Trust, Access, Policies, `wiisports allowed people`: add the email |
 | Logs | `ls ~/wiisports-host/logs/` (`com.wiisports.host.log`, `com.wiisports.tunnel.log`, `build.log`) |
 
 ## If something goes wrong
@@ -120,8 +123,7 @@ and tap Connect.
 | `ERROR: Xcode Command Line Tools missing` | Run `xcode-select --install`, finish the installer, rerun. |
 | `ERROR: this is not PAL Wii Sports Resort (RZTP01)` | Wrong disc. It must be the standalone PAL disc, not the Wii Sports + Wii Sports Resort bundle and not the US version. |
 | `ERROR: checksum mismatch` | A download was corrupted or changed upstream. Rerun once; if it repeats, stop and report the URL. |
-| `Zero Trust may not be set up on this account yet` | Do "Before you start" step 1, rerun `host/macmini/setup.sh cloudflare`. |
-| A Cloudflare error code about permissions | The API token is missing one of the permissions in the table. Edit the token, rerun `host/macmini/setup.sh cloudflare`. |
+| `no tunnel token` | `WSR_TUNNEL_TOKEN` is empty in `wiisports.env`. Get it from Henry (or the dashboard, see "Before you start"). |
 | `verify` says the hostname answered 502 or 530 | The tunnel is up but the local server is not: `host/macmini/setup.sh serve`. |
 | `launchctl could not load` | Usually nobody is logged in at the Mac. Turn on automatic login (step 4) and reboot, or rerun after logging in. |
 | The page says WebGPU or JSPI is missing | The viewer is on Safari or an old browser. Use desktop Chrome or Edge 137+. |

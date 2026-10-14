@@ -70,7 +70,13 @@ def step(text: str) -> None:
     print(f"==> {text}", flush=True)
 
 
-def ensure_otp_login(cf: Client, account: str) -> None:
+OTP_HELP = ("add it in the dashboard: Zero Trust > Settings > Authentication > Login methods > "
+            "Add new > One-time PIN > Save (or give the API token 'Access: Organizations, Identity "
+            "Providers, and Groups: Edit'), then run this again")
+
+
+def ensure_otp_login(cf: Client, account: str) -> bool:
+    """True when the One-time PIN login method exists (afterwards)."""
     step("Zero Trust login method (One-time PIN)")
     try:
         providers = cf.call("GET", f"/accounts/{account}/access/identity_providers") or []
@@ -80,10 +86,15 @@ def ensure_otp_login(cf: Client, account: str) -> None:
             "go to Zero Trust, pick a team name and the Free plan, then run this again.") from err
     if any(p.get("type") == "onetimepin" for p in providers):
         print("    already enabled")
-        return
-    cf.call("POST", f"/accounts/{account}/access/identity_providers",
-            {"name": "One-time PIN", "type": "onetimepin", "config": {}})
+        return True
+    try:
+        cf.call("POST", f"/accounts/{account}/access/identity_providers",
+                {"name": "One-time PIN", "type": "onetimepin", "config": {}})
+    except CloudflareError as err:
+        print(f"    NOT enabled ({err}).\n    Nobody can log in until it exists: {OTP_HELP}")
+        return False
     print("    enabled")
+    return True
 
 
 def ensure_tunnel(cf: Client, account: str, hostname: str, service: str) -> tuple[str, str]:
@@ -133,7 +144,7 @@ def ensure_dns(cf: Client, hostname: str, tunnel_id: str) -> None:
         print(f"    created in zone {zone_name}: CNAME {target}")
 
 
-def ensure_access(cf: Client, account: str, hostname: str, emails: list[str]) -> None:
+def ensure_access(cf: Client, account: str, hostname: str, emails: list[str], otp: bool) -> None:
     step(f"Access login in front of {hostname}")
     policy_body = {"name": POLICY_NAME, "decision": "allow", "session_duration": SESSION,
                    "include": [{"email": {"email": e}} for e in emails]}
@@ -145,7 +156,8 @@ def ensure_access(cf: Client, account: str, hostname: str, emails: list[str]) ->
         policy = cf.call("POST", f"/accounts/{account}/access/policies", policy_body)
     print(f"    policy allows: {', '.join(emails)}")
     app_body = {"name": APP_NAME, "type": "self_hosted", "domain": hostname, "session_duration": SESSION,
-                "app_launcher_visible": False, "auto_redirect_to_identity": True,
+                # Skip the provider chooser when the email code is the only way in.
+                "app_launcher_visible": False, "auto_redirect_to_identity": otp,
                 "policies": [{"id": policy["id"], "precedence": 1}]}
     apps = cf.call("GET", f"/accounts/{account}/access/apps") or []
     app = next((a for a in apps if a.get("domain") == hostname or a.get("name") == APP_NAME), None)
@@ -170,10 +182,10 @@ def main() -> int:
         sys.exit("set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (see the docstring for the token's permissions)")
     cf = Client(token)
     try:
-        ensure_otp_login(cf, account)
+        otp = ensure_otp_login(cf, account)
         tunnel_id, tunnel_token = ensure_tunnel(cf, account, a.hostname, a.service)
         ensure_dns(cf, a.hostname, tunnel_id)
-        ensure_access(cf, account, a.hostname, a.allow)
+        ensure_access(cf, account, a.hostname, a.allow, otp)
     except CloudflareError as err:
         sys.exit(f"cloudflare_setup.py: {err}")
     if a.token_out:
@@ -184,6 +196,9 @@ def main() -> int:
     else:
         step("Tunnel token (keep it private):")
         print(tunnel_token)
+    if not otp:
+        print(f"\nAlmost done: the One-time PIN login method is missing; {OTP_HELP}.")
+        return 2
     print(f"\nDone. https://{a.hostname} will ask for an email code once the tunnel connector runs.")
     return 0
 

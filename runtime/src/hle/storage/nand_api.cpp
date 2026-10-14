@@ -70,6 +70,15 @@ static bool RenameNoReplace(const std::filesystem::path& from,
     }
     error = std::error_code(errno, std::generic_category());
     return false;
+#elif defined(__EMSCRIPTEN__)
+    // No renameat2 in the browser filesystem, but nothing else runs between the
+    // check and the rename: one game per page, single-threaded.
+    if (std::filesystem::exists(to, error)) {
+        error = std::make_error_code(std::errc::file_exists);
+        return false;
+    }
+    std::filesystem::rename(from, to, error);
+    return !error;
 #else
     (void)from;
     (void)to;
@@ -194,7 +203,13 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
             file = NandFopen(hostPath, fopenMode);
         }
         if (!file) {
-            LogNandError("NANDOpen", "FAILED to open");
+            // Only a read open can legitimately find nothing; write modes create the file.
+            if (mode == 1 && !PathExists(hostPath)) {
+                LogNandNotFound("NANDOpen", hostPath, "optional file, the game handles NOEXISTS");
+            } else {
+                LogNandError("NANDOpen", "FAILED to open '%s' (mode %u)",
+                             HostPathText(hostPath).c_str(), mode);
+            }
             return NAND_RESULT_NOEXISTS;
         }
     }
@@ -488,7 +503,11 @@ extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
             // link(2) and CreateHardLink do not replace an existing destination,
             // unlike rename(2) on POSIX. Both paths are already on the target
             // filesystem, so the link is a no-replace publication operation.
+#if defined(__EMSCRIPTEN__)
+            RenameNoReplace(tempHost, dstHost, publishEc);  // no hard links on the web
+#else
             std::filesystem::create_hard_link(tempHost, dstHost, publishEc);
+#endif
         }
         if (publishEc) {
             LogNandError("NANDMove", "failed to publish cross-mount copy: %s",

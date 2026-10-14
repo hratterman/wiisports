@@ -1,24 +1,40 @@
-﻿# Public WiiCompiled product graph.
+# Public WiiCompiled product graph.
 #
 # The translator owns the translated build graph. Mario Kart's profile-neutral
 # functions are compiled once into mkw_base_shared; only callers whose direct
 # ABI differs between profiles receive small base/RR variants.
 
-set(DATA_INIT_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init.cpp")
-set(DATA_INIT_BLOB_ASM "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init_blobs.S")
+# Directory holding the translator's generated/ tree: the workspace root unless overridden (the
+# web smoke test points it at a synthetic translation that lives outside the repository).
+set(MKW_GENERATED_ROOT "${MKW_RUNTIME_SOURCE_DIR}/.." CACHE PATH
+    "Directory containing the translator's generated/ output")
+set(DATA_INIT_FILE "${MKW_GENERATED_ROOT}/generated/data_sections_init.cpp")
+set(DATA_INIT_BLOB_ASM "${MKW_GENERATED_ROOT}/generated/data_sections_init_blobs.S")
 if(EXISTS "${DATA_INIT_FILE}")
     list(APPEND SOURCES "${DATA_INIT_FILE}")
 endif()
 # Crash-report symbolization table emitted by generate-data-init. The stub
 # (deliberately outside the globbed src/ tree so it is never picked up twice)
 # keeps link succeeding when the generated table has not been produced yet.
-set(GUEST_SYMBOL_TABLE_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/guest_symbol_table.cpp")
+set(GUEST_SYMBOL_TABLE_FILE "${MKW_GENERATED_ROOT}/generated/guest_symbol_table.cpp")
 if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
     list(APPEND SOURCES "${GUEST_SYMBOL_TABLE_FILE}")
 else()
     list(APPEND SOURCES "${MKW_RUNTIME_SOURCE_DIR}/cmake/guest_symbol_table_stub.cpp")
 endif()
-if(EXISTS "${DATA_INIT_BLOB_ASM}")
+# wasm cannot assemble the .incbin blobs; the translator writes an #embed C++ companion with the
+# same symbols beside every blob .S. Exactly one of the pair may be compiled.
+set(DATA_INIT_BLOB_CPP "${MKW_GENERATED_ROOT}/generated/data_sections_init_blobs.cpp")
+if(MKW_PLATFORM_WEB)
+    if(EXISTS "${DATA_INIT_BLOB_CPP}")
+        set_source_files_properties("${DATA_INIT_BLOB_CPP}" PROPERTIES
+            SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
+        list(APPEND SOURCES "${DATA_INIT_BLOB_CPP}")
+    elseif(EXISTS "${DATA_INIT_BLOB_ASM}")
+        message(FATAL_ERROR "${DATA_INIT_BLOB_ASM} has no ${DATA_INIT_BLOB_CPP} companion; "
+            "re-run the translator's generate-data-init")
+    endif()
+elseif(EXISTS "${DATA_INIT_BLOB_ASM}")
     # The translator emits ELF directives on Linux. Keep the shared translation
     # intact and produce a COFF assembly input only for the Windows build.
     if(MKW_PLATFORM_WINDOWS)
@@ -37,6 +53,7 @@ list(REMOVE_DUPLICATES SOURCES)
 if(MKW_PLATFORM_MACOS)
     find_library(MKW_IOKIT_FRAMEWORK IOKit REQUIRED)
     find_library(MKW_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(MKW_COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
 endif()
 
 function(mkw_apply_common_compile_options target)
@@ -54,6 +71,7 @@ function(mkw_configure_object_target target)
         "${MKW_RUNTIME_SOURCE_DIR}/src"
         # Workspace root, so translator output is spelled "generated/<x>.h"
         # instead of a ../ chain whose depth depends on the includer.
+        "${MKW_GENERATED_ROOT}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
@@ -97,11 +115,22 @@ target_link_libraries(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE mkw_platform mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
 if(MKW_PLATFORM_WINDOWS)
     target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp mkw::libco)
-elseif(MKW_PLATFORM_LINUX)
+elseif(MKW_PLATFORM_LINUX OR MKW_PLATFORM_MACOS_X86_64)
     # ${CMAKE_DL_LIBS} for music_attenuation.cpp's dlopen of libdbus-1 (MPRIS
-    # media monitoring). Empty string on glibc >= 2.34 where dl* is in libc.
+    # media monitoring). Empty on platforms where dl* is already in libc/libSystem.
     target_link_libraries(mkw_runtime_common PRIVATE mkw::libco ${CMAKE_DL_LIBS})
 endif()
+
+if(MKW_PLATFORM_MACOS)
+    # CoreAudio framework is required for automatic music muting on macOS.
+    target_link_libraries(mkw_runtime_common PRIVATE "${MKW_COREAUDIO_FRAMEWORK}")
+    if(MKW_PLATFORM_MACOS_X86_64)
+        # libco is used by Intel macOS. Apple Silicon uses the local
+        # x18-safe assembly backend and therefore does not define mkw::libco.
+        target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
+    endif()
+endif()
+
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
         message(FATAL_ERROR
@@ -131,29 +160,23 @@ foreach(source IN LISTS SOURCES)
     endif()
     set_source_files_properties("${source}" PROPERTIES UNITY_GROUP "${runtime_group}")
 endforeach()
-# These translation units implement guest-visible floating-point bit
-# semantics.  Keep them out of the fast-math runtime unity groups and apply
-# the same contraction/rounding policy as translated PPC shards.
-set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
-    "${MKW_RUNTIME_SOURCE_DIR}/src/ppc_helpers.cpp"
-    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp")
-set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
-    SKIP_UNITY_BUILD_INCLUSION ON
-    SKIP_PRECOMPILE_HEADERS ON
-    COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# PPC semantic sources are excluded from unity/PCH and configured in CMakeLists.txt.
 set_target_properties(mkw_runtime_common PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GROUP)
 target_precompile_headers(mkw_runtime_common PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
 mkw_apply_common_compile_options(mkw_runtime_common)
 
-# Host ISA guard. Windows and Linux x86_64 product targets use x86-64-v3, so
-# this object deliberately keeps the plain baseline ISA and checks the CPU
-# before any AVX2/FMA code can execute. AArch64 has no equivalent optional ISA
-# floor to probe: NEON/FMA are architectural requirements.
+# Host ISA guard deliberately keeps the plain baseline ISA and checks the
+# selected x86 profile before optional instructions can execute. AArch64 has
+# no equivalent optional ISA floor to probe: NEON/FMA are architectural
+# requirements.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     add_library(mkw_cpu_baseline OBJECT "${MKW_CPU_BASELINE_SOURCE}")
     target_compile_features(mkw_cpu_baseline PRIVATE cxx_std_17)
     set_target_properties(mkw_cpu_baseline PROPERTIES UNITY_BUILD OFF)
     target_compile_options(mkw_cpu_baseline PRIVATE -w)
+    if(MKW_X86_CPU_PROFILE STREQUAL "v2")
+        target_compile_definitions(mkw_cpu_baseline PRIVATE MKW_X86_CPU_PROFILE_V2=1)
+    endif()
 endif()
 
 if(NOT MKW_BASE_COMMON_SHARDS)
@@ -177,6 +200,18 @@ if(MKW_HAVE_RETRO_REWIND)
         target_precompile_headers(mkw_retro_sensitive REUSE_FROM mkw_base_shared)
     endif()
 
+    if(MKW_PLATFORM_WEB)
+        # Same .S -> #embed companion swap as the base data blobs above.
+        set(_mkw_retro_web_sources)
+        foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
+            if(source MATCHES "\\.S$")
+                string(REGEX REPLACE "\\.S$" ".cpp" source "${source}")
+                set_source_files_properties("${source}" PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+            endif()
+            list(APPEND _mkw_retro_web_sources "${source}")
+        endforeach()
+        set(MKW_RETRO_EXTRA_SOURCES ${_mkw_retro_web_sources})
+    endif()
     set(MKW_RETRO_TRANSLATED_SOURCES ${MKW_RETRO_MOD_SHARDS} ${MKW_RETRO_EXTRA_SOURCES})
     set(MKW_RETRO_BLOB_OBJECTS)
     foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
@@ -190,6 +225,52 @@ if(MKW_HAVE_RETRO_REWIND)
     target_precompile_headers(mkw_retro_rewind_functions REUSE_FROM mkw_base_shared)
 endif()
 
+# Browser product: a JSPI module (WiiCompiled.js + .wasm) for the page in web/site. The files a
+# native build copies beside the executable are embedded at /app (RuntimePlatform::
+# ExecutableDirectory() on the web). The aurora sqlite pipeline cache is off in the browser and
+# networking is compiled out, so neither the initial pipeline cache nor cacert.pem ships.
+function(mkw_configure_web_product target)
+    set(web_dir "${MKW_RUNTIME_SOURCE_DIR}/../web")
+    set(dsp_rom "${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin")
+    set(bootstrap "${MKW_RUNTIME_SOURCE_DIR}/assets/wii")
+    if(NOT EXISTS "${dsp_rom}" OR NOT EXISTS "${bootstrap}/shared2/wc24")
+        message(FATAL_ERROR "Missing bundled runtime assets under ${MKW_RUNTIME_SOURCE_DIR}/assets")
+    endif()
+    file(GLOB js_libraries CONFIGURE_DEPENDS "${web_dir}/js/*.js")
+    set_target_properties(${target} PROPERTIES SUFFIX ".js")
+    target_link_options(${target} PRIVATE
+        -sJSPI
+        "-sJSPI_EXPORTS=main,mkw_host_context_entry"
+        -sENVIRONMENT=web
+        -sALLOW_MEMORY_GROWTH=1
+        # The translated game's static data alone is ~24 MB (above the 16 MB default), and the
+        # guest MEM1/MEM2 stores (152 MiB) are allocated at startup anyway.
+        -sINITIAL_MEMORY=256MB
+        -sMAXIMUM_MEMORY=4GB
+        # The main stack hosts the scheduler; guest threads own their own shadow stacks.
+        -sSTACK_SIZE=8MB
+        -sEXPORTED_RUNTIME_METHODS=FS,ENV
+        # <target>.js.symbols maps wasm function indices to names, so a stack from a player's
+        # error report ("wasm-function[N]") can be symbolized without shipping a name section.
+        --emit-symbol-map
+        -lidbfs.js
+        "--embed-file=${dsp_rom}@/app/dsp_coef.bin"
+        "--embed-file=${bootstrap}@/app/wii_bootstrap")
+    foreach(library IN LISTS js_libraries)
+        target_link_options(${target} PRIVATE "--js-library=${library}")
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${library}")
+    endforeach()
+    # For web/build.sh: the site assembly copies these next to index.html.
+    if(MKW_PLATFORM_WEB_DIST)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MKW_PLATFORM_WEB_DIST}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:${target}>/${target}.js"
+                "$<TARGET_FILE_DIR:${target}>/${target}.wasm"
+                "${MKW_PLATFORM_WEB_DIST}")
+    endif()
+endfunction()
+
 function(mkw_configure_product target)
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
     # Startup CPU check. Must stay a separate object library so it keeps the
@@ -202,6 +283,7 @@ function(mkw_configure_product target)
         "${MKW_RUNTIME_SOURCE_DIR}/src"
         # Workspace root, so translator output is spelled "generated/<x>.h"
         # instead of a ../ chain whose depth depends on the includer.
+        "${MKW_GENERATED_ROOT}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
@@ -218,7 +300,9 @@ function(mkw_configure_product target)
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
     if(MKW_PLATFORM_MACOS)
         target_link_libraries(${target} PRIVATE
-            "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}")
+            "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}" "${MKW_COREAUDIO_FRAMEWORK}")
+        target_link_options(${target} PRIVATE
+            "LINKER:-U,_OBJC_CLASS_$_MTLLogStateDescriptor")
     endif()
     if(EXISTS "${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
         include("${MKW_AURORA_DIR}/cmake/AuroraCopyRuntimeDLLs.cmake")
@@ -239,7 +323,7 @@ function(mkw_configure_product target)
             dbghelp user32 winmm ws2_32 iphlpapi secur32 crypt32 windowsapp mkw::libco)
 
         set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE TRUE)
-    elseif(MKW_PLATFORM_LINUX)
+    elseif(MKW_PLATFORM_LINUX OR MKW_PLATFORM_MACOS_X86_64)
         # mkw_runtime_common is an OBJECT library: WiiCompiled/RetroRewind only pull in its .o
         # files via $<TARGET_OBJECTS:>, which does not propagate mkw_runtime_common's own
         # target_link_libraries (object libraries don't carry usage requirements to a consumer
@@ -271,6 +355,11 @@ function(mkw_configure_product target)
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${runtime_dll_path}" $<TARGET_FILE_DIR:${target}>)
         endforeach()
+    endif()
+
+    if(MKW_PLATFORM_WEB)
+        mkw_configure_web_product(${target})
+        return()
     endif()
 
     set(MKW_WII_BOOTSTRAP_SOURCE_DIR "${MKW_RUNTIME_SOURCE_DIR}/assets/wii")
@@ -345,12 +434,14 @@ else()
     message(STATUS "RetroRewind target disabled (run translate-mod and emit-build-shards)")
 endif()
 
-# Windows and Linux x86_64 share the x86-64-v3 floor that the CPU baseline
-# object above checks. AArch64 builds are compiled locally for the host that
-# will run them, so both Linux and Apple Silicon use the compiler's native CPU
-# tuning rather than leaving target-specific performance on the table.
+# Windows, Linux and Intel macOS x86_64 use the selected profile. AArch64
+# builds are compiled locally for the host that will run them, so both Linux
+# and Apple Silicon use the compiler's native CPU tuning rather than leaving
+# target-specific performance on the table.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
-    set(MKW_BASELINE_ARCH_FLAG -march=x86-64-v3)
+    set(MKW_BASELINE_ARCH_FLAG -march=x86-64-${MKW_X86_CPU_PROFILE})
+elseif(MKW_PLATFORM_WEB)
+    set(MKW_BASELINE_ARCH_FLAG ${MKW_WEB_SIMD_FLAGS})
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
 else()
@@ -363,5 +454,8 @@ set(MKW_ALL_BUILD_TARGETS
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target} AND MKW_BASELINE_ARCH_FLAG)
         target_compile_options(${target} PRIVATE ${MKW_BASELINE_ARCH_FLAG})
+        if(MKW_X86_CPU_PROFILE STREQUAL "v2")
+            target_compile_definitions(${target} PRIVATE MKW_X86_CPU_PROFILE_V2=1)
+        endif()
     endif()
 endforeach()

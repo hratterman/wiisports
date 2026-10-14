@@ -17,6 +17,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+#include "hle/web_disc.h"
+#endif
+
 namespace DvdFstContract {
 
 struct RegisteredFile {
@@ -293,6 +297,29 @@ inline bool ReadExact(const std::filesystem::path& hostPath,
                       std::vector<uint8_t>& destination,
                       HostReadFailure& failure) {
     failure = HostReadFailure::None;
+
+#ifdef __EMSCRIPTEN__
+    // Hosted trees (the disc at /disc, the mod pack at /mods/<name>) are streamed over HTTP
+    // Range requests with the same failure contract; anything else (e.g. files in the
+    // Emscripten FS) reads below.
+    if (const auto location = WebDisc::Locate(hostPath)) {
+        switch (WebDisc::Read(location->mount, location->relPath, offset, length, destination)) {
+        case WebDisc::ReadStatus::Ok:
+            return true;
+        case WebDisc::ReadStatus::MissingFile:
+            failure = HostReadFailure::MissingFile;
+            return false;
+        case WebDisc::ReadStatus::BadOffset:
+            failure = HostReadFailure::BadOffset;
+            return false;
+        case WebDisc::ReadStatus::ShortRead:
+            failure = HostReadFailure::ShortRead;
+            return false;
+        }
+        failure = HostReadFailure::MissingFile;
+        return false;
+    }
+#endif
 
     std::ifstream file(hostPath, std::ios::binary);
     if (!file.is_open()) {

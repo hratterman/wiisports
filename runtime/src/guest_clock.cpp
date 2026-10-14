@@ -1,5 +1,6 @@
 #include "guest_clock.h"
 #include "timebase_contract.h"
+#include "platform/web_host.h"
 #include <chrono>
 #include <mutex>
 #include <algorithm>
@@ -19,11 +20,14 @@ uint64_t ReadTimeBase() noexcept {
 }
 std::chrono::steady_clock::time_point SchedulingNow() noexcept {
     std::lock_guard<std::mutex> lock(clockMutex);
-    return (depth ? pauseStart : std::chrono::steady_clock::now()) - paused;
+    // The browser build parks the guest while the page is hidden; that time never happened for it.
+    return (depth ? pauseStart : std::chrono::steady_clock::now()) - paused -
+           std::chrono::nanoseconds(WebHost::ParkedNanos());
 }
 std::chrono::steady_clock::time_point ToHostTime(std::chrono::steady_clock::time_point guest) noexcept {
     std::lock_guard<std::mutex> lock(clockMutex);
-    return guest + paused + (depth ? std::chrono::steady_clock::now() - pauseStart :
+    return guest + paused + std::chrono::nanoseconds(WebHost::ParkedNanos()) +
+           (depth ? std::chrono::steady_clock::now() - pauseStart :
                                     std::chrono::steady_clock::duration{});
 }
 Pause::Pause(std::chrono::steady_clock::duration elapsedBudget) noexcept

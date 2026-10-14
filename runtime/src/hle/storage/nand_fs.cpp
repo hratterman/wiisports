@@ -6,6 +6,9 @@
 #include "isa/big_endian.h"
 #include "hle/storage/riivolution.h"
 #include "runtime_log.h"
+#ifdef __EMSCRIPTEN__
+#include "hle/web_disc.h" // web build: the disc is streamed from the hosting site
+#endif
 
 // ============================================================================
 // Configuration
@@ -37,6 +40,15 @@ void LogNandWarning(const char* func, const char* fmt, ...) {
     va_start(args, fmt);
     EmitNandLog(func, fmt, args);
     va_end(args);
+}
+
+void LogNandNotFound(const char* func, const std::filesystem::path& hostPath, const char* detail) {
+    const std::string text = HostPathText(hostPath);
+    if (!RtLogFirstTime(std::string(func) + '|' + text)) {
+        return;
+    }
+    RT_LOGF_INFO(RT_TAG_NAND, "%s: '%s' not found (%s; reported once per path)\n", func, text.c_str(),
+                 detail);
 }
 
 // ============================================================================
@@ -289,22 +301,9 @@ struct U8Node {
     uint32_t size;
 };
 
-static bool ExtractFromU8(const std::filesystem::path& archivePath, const char* targetName,
-                          std::vector<uint8_t>& outData) {
-    std::ifstream file(archivePath, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-
-    file.seekg(0, std::ios::end);
-    const std::streamsize size = file.tellg();
-    if (size < 0x20) {
-        return false;
-    }
-    file.seekg(0, std::ios::beg);
-
-    std::vector<uint8_t> data(static_cast<size_t>(size));
-    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+static bool ExtractFromU8Data(const std::vector<uint8_t>& data, const char* targetName,
+                              std::vector<uint8_t>& outData) {
+    if (data.size() < 0x20) {
         return false;
     }
 
@@ -372,12 +371,40 @@ static bool ExtractFromU8(const std::filesystem::path& archivePath, const char* 
     return false;
 }
 
+#ifndef __EMSCRIPTEN__
+static bool ExtractFromU8(const std::filesystem::path& archivePath, const char* targetName,
+                          std::vector<uint8_t>& outData) {
+    std::ifstream file(archivePath, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    file.seekg(0, std::ios::end);
+    const std::streamsize size = file.tellg();
+    if (size < 0x20) {
+        return false;
+    }
+    file.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+        return false;
+    }
+    return ExtractFromU8Data(data, targetName, outData);
+}
+#endif
+
 // The only FaceLib resource the game ever seeds; every call site used to pass it
 // as an argument and the path predicate below hard-codes the same name.
 static constexpr char kFaceLibResourceName[] = "RFL_Res.dat";
 
 bool SeedFaceLibResource(const std::filesystem::path& hostPath) {
     std::vector<uint8_t> payload;
+#ifdef __EMSCRIPTEN__
+    if (std::vector<uint8_t> archive; WebDisc::ReadWhole("files/contents/RFLRes01.arc", archive)) {
+        ExtractFromU8Data(archive, kFaceLibResourceName, payload);
+    }
+#else
     if (const auto dvdRoot = RuntimeConfigFile::ResolvedDvdRoot(); !dvdRoot.empty()) {
         const auto arcPath = dvdRoot / "files" / "contents" / "RFLRes01.arc";
         std::error_code ec;
@@ -385,6 +412,7 @@ bool SeedFaceLibResource(const std::filesystem::path& hostPath) {
             ExtractFromU8(arcPath, kFaceLibResourceName, payload);
         }
     }
+#endif
 
     if (payload.empty()) {
         LogNandError("FaceLibSeed", "Failed to locate %s in RFLRes01.arc", kFaceLibResourceName);

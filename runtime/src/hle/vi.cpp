@@ -9,6 +9,7 @@
 #include "fiber_manager.h"
 #include "platform/host_platform.h"
 #include "runtime_log.h"
+#include "audio_backend.h"
 
 #include <dolphin/vi.h>
 
@@ -30,6 +31,7 @@
 #endif
 
 #include <aurora/aurora.h>
+#include "platform/web_host.h"
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
 extern "C" void OSWakeupThread_HLE_8004ef10(CpuContext* ctx);
@@ -167,6 +169,14 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
     if (now >= deadline) {
         return;
     }
+#if defined(__EMSCRIPTEN__)
+    // The browser build cannot block or spin the page's only thread: suspend until the deadline
+    // (timer, then macrotask hops for the final stretch, which also covers the spin window).
+    (void)finishWithSpin;
+    (void)spinWindow;
+    WebHost::SleepUntil(deadline);
+    return;
+#endif
     const auto timerDeadline =
         finishWithSpin && deadline - now > spinWindow ? deadline - spinWindow : deadline;
 #if defined(_WIN32)
@@ -254,6 +264,30 @@ void EnsureInitializedLocked() {
 // 5 EURGB60) in bits [4:2].
 uint32_t ExtractTvFormat(uint32_t tvMode) {
     return (tvMode >> 2) & 0x7;
+}
+
+// Browser build: while the page is hidden, park the whole guest here (WebHost::WaitWhilePageHidden
+// suspends the only stack until the page is visible again) instead of simulating a console nobody
+// can see. Called at frame and retrace boundaries. Audio output pauses with it. GuestClock
+// subtracts parked time (WebHost::ParkedNanos), so the guest-time retrace grid and pacing deadlines
+// need no adjustment and no retraces are "caught up" on resume. Returns the parked time (zero when
+// visible, always zero natively).
+Clock::duration ParkWhilePageHidden() {
+#if defined(__EMSCRIPTEN__)
+    if (!WebHost::PageHidden()) {
+        return {};
+    }
+    RT_LOG(RT_TAG_VI) << "page hidden: pausing the game until it is visible again" << std::endl;
+    AudioBackend::Instance().SetOutputPaused(true);
+    const auto parked = std::chrono::duration_cast<Clock::duration>(WebHost::WaitWhilePageHidden());
+    AudioBackend::Instance().SetOutputPaused(false);
+    RT_LOG(RT_TAG_VI) << "page visible: resumed after "
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(parked).count() << " ms"
+                      << std::endl;
+    return parked;
+#else
+    return {};
+#endif
 }
 
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread
@@ -382,6 +416,12 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
 bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 {
     bool advancedAny = false;
+    // Retrace boundaries keep coming while the game is loading or otherwise not presenting, so this
+    // is the fallback park point (frame presents park in VI_HLE_PresentFrame). Only on the paths that
+    // own Aurora: the deferred path runs inside a native GX call.
+    if (serviceAurora) {
+        (void)ParkWhilePageHidden();
+    }
 
     for (int catchUpCount = 0; catchUpCount < maxToProcess; ++catchUpCount) {
         Clock::time_point target;
@@ -579,7 +619,25 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         aurora_set_present_schedule(0, 0);
     }
 
-    aurora_end_frame();
+    // A frame is only sealed if one was begun. Begin can fail (window hidden or minimized, surface
+    // being recreated, render targets not created yet); every GX command since was dropped, and
+    // ending the never-begun frame used to unmap and rotate a staging buffer this frame never
+    // mapped. Skip the seal and keep the pacing.
+    if (g_auroraFrameActive.load(std::memory_order_acquire)) {
+        aurora_end_frame();
+        WebHost::NoteFramePresented();
+    } else {
+        static uint32_t s_skippedPresentCount = 0;
+        if (s_skippedPresentCount < 16 || (s_skippedPresentCount & 1023) == 0) {
+            RT_LOGF(RT_TAG_VI, "present skipped: no active Aurora frame (n=%u)\n", s_skippedPresentCount + 1);
+        }
+        ++s_skippedPresentCount;
+    }
+    // Browser build: give the page a turn every frame so the canvas presents and input arrives
+    // even when the frame ran late and pacing below has nothing left to wait for. No-op natively.
+    WebHost::Yield();
+    // Browser build: a hidden page parks here, between frames, until it is visible again.
+    (void)ParkWhilePageHidden();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
         std::lock_guard<std::mutex> lock(g_viMutex);
@@ -626,7 +684,7 @@ void VI_HLE_SetXfbReady(uint32_t xfbAddr) {
 // the same defaults instead, so the two entry points share one body.
 static void SeedViStateForInit(CpuContext* ctx, const char* who)
 {
-    RT_LOG(RT_TAG_VI) << who << " called: seeding VI state (HLE)" << std::endl;
+    RT_LOG_INFO(RT_TAG_VI) << who << " called: seeding VI state (HLE)" << std::endl;
     {
         std::lock_guard<std::mutex> lock(g_viMutex);
         EnsureInitializedLocked();
@@ -653,21 +711,21 @@ PPC_NATIVE_OVERRIDE_VOID(800569A0, __VIInit_HLE_800569a0, (CpuContext* ctx), (ct
 extern "C" void VIInit_caseD_0_HLE_80057034(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG(RT_TAG_VI) << "VIInit_caseD_0_80057034 stubbed" << std::endl;
+    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_0_80057034 stubbed" << std::endl;
 }
 PPC_NATIVE_OVERRIDE_VOID(80057034, VIInit_caseD_0_HLE_80057034, (CpuContext* ctx), (ctx));
 
 extern "C" void VIInit_caseD_1_HLE_8005703c(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG(RT_TAG_VI) << "VIInit_caseD_1_8005703c stubbed" << std::endl;
+    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_1_8005703c stubbed" << std::endl;
 }
 PPC_NATIVE_OVERRIDE_VOID(8005703C, VIInit_caseD_1_HLE_8005703c, (CpuContext* ctx), (ctx));
 
 extern "C" void VIInit_caseD_2_HLE_80057044(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG(RT_TAG_VI) << "VIInit_caseD_2_80057044 stubbed" << std::endl;
+    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_2_80057044 stubbed" << std::endl;
 }
 PPC_NATIVE_OVERRIDE_VOID(80057044, VIInit_caseD_2_HLE_80057044, (CpuContext* ctx), (ctx));
 

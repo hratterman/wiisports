@@ -9,11 +9,17 @@
 // layer's caches must be notified explicitly that these bytes changed.
 extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include "hle/storage/riivolution.h"
+#include "hle/web_host_fs.h"
 #include "ppc_runtime.h"
 #include "recomp_mod_loader.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
+#ifdef __EMSCRIPTEN__
+// Web build: the disc is the operator-hosted tree described by disc-manifest.json, mapped to
+// WebDisc::RootPath() and streamed over HTTP Range (see runtime/include/hle/web_disc.h).
+#include "hle/web_disc.h"
+#endif
 
 #include <cstdint>
 #include <cstdlib>
@@ -155,6 +161,25 @@ static bool IsDvdDataRoot(const fs::path& path) {
 
 static const fs::path& GetDvdRoot() {
     std::call_once(g_dvdRootOnce, []() {
+#ifdef __EMSCRIPTEN__
+        // [paths] dvd_root is not consulted on the web: the disc always comes from the site.
+        std::string error;
+        if (!WebDisc::EnsureLoaded(&error)) {
+            RT_LOGF(RT_TAG_DVD, "ERROR: %s\n", error.c_str());
+            FailDvd("dvd_root", "DVD data is unavailable",
+                    "The game data could not be loaded from this site.\n\n" + error);
+        }
+        if (!WebDisc::IsDataRoot()) {
+            const std::string details =
+                "The hosted disc tree at " + WebDisc::BaseUrl() +
+                " is not an extracted DATA directory (its manifest lists no files/ directory "
+                "or no sys/fst.bin).";
+            RT_LOGF(RT_TAG_DVD, "ERROR: %s\n", details.c_str());
+            FailDvd("dvd_root", "DVD data is unavailable", details);
+        }
+        g_dvdRoot = WebDisc::RootPath();
+        return;
+#endif
         const fs::path path = RuntimeConfigFile::ResolvedDvdRoot();
         if (path.empty()) {
             FailDvdRoot("No DVD root is configured");
@@ -239,6 +264,13 @@ static void LoadFstIndex() {
     g_fstLoaded = true;
 
     const fs::path fstPath = GetDvdRoot() / "sys" / "fst.bin";
+#ifdef __EMSCRIPTEN__
+    std::vector<uint8_t> data;
+    const auto fstRelPath = WebDisc::RelativePath(fstPath);
+    if (!fstRelPath || !WebDisc::ReadWhole(*fstRelPath, data) || data.size() < 12) {
+        return;
+    }
+#else
     std::ifstream fstFile(fstPath, std::ios::binary);
     if (!fstFile.is_open()) {
         return;
@@ -256,6 +288,7 @@ static void LoadFstIndex() {
     if (!fstFile) {
         return;
     }
+#endif
 
     const uint32_t entryCount = BigEndian::Read32(&data[8]);
     if (entryCount == 0 || entryCount > 0x10000) {
@@ -473,6 +506,28 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
 // the disc may be replaced, nothing new is added.
 static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix,
                           bool recursive = true, bool addNewFiles = true) {
+#ifdef __EMSCRIPTEN__
+    // Hosted trees (the disc, a streamed mod pack) have no Emscripten FS presence; their
+    // listing is the manifest.
+    {
+        std::string prefix = virtualPrefix.empty() ? "/" : virtualPrefix;
+        if (prefix.back() != '/' && prefix.back() != '\\') {
+            prefix += "/";
+        }
+        const bool mounted = WebHostFs::ForEachMountedFile(
+            root, recursive,
+            [&](const fs::path& hostPath, const std::string& relativeToRoot, uint64_t size) {
+                std::string dvdPath = prefix + relativeToRoot;
+                if (!addNewFiles && !DvdEntryExists(dvdPath)) {
+                    return;
+                }
+                RegisterFileEntry(std::move(dvdPath), hostPath, static_cast<uint32_t>(size));
+            });
+        if (mounted) {
+            return;
+        }
+    }
+#endif
     std::error_code ec;
     if (!fs::exists(root, ec)) {
         return;
@@ -550,9 +605,26 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
         }
     };
 
+#ifdef __EMSCRIPTEN__
+    const bool mounted = WebHostFs::ForEachMountedFile(
+        mapping.hostPath, mapping.recursive,
+        [&](const fs::path& hostPath, const std::string&, uint64_t size) {
+            std::string name = HostPathText(hostPath.filename());
+            RuntimeHle::LowerInPlace(name);
+            const auto matches = discPathsByName.find(name);
+            if (matches == discPathsByName.end()) {
+                return;
+            }
+            for (const std::string& dvdPath : matches->second) {
+                RegisterFileEntry(dvdPath, hostPath, static_cast<uint32_t>(size));
+                ++replaced;
+            }
+        });
+    if (!mounted)
+#endif
     WalkDirectory(mapping.hostPath, mapping.recursive, /*announceErrors=*/false, applyEntry);
 
-    RT_LOG(RT_TAG_DVD) << HostPathText(mapping.hostPath) << ": replaced " << replaced
+    RT_LOG_INFO(RT_TAG_DVD) << HostPathText(mapping.hostPath) << ": replaced " << replaced
               << " disc file(s) by filename" << std::endl;
 }
 
@@ -574,7 +646,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
                 break;
             }
             std::error_code ec;
-            const std::uintmax_t size = fs::file_size(mapping.hostPath, ec);
+            const std::uintmax_t size = WebHostFs::FileSize(mapping.hostPath, ec);
             if (!ec) {
                 RegisterFileEntry(mapping.discPath, mapping.hostPath, static_cast<uint32_t>(size));
             }
@@ -601,7 +673,7 @@ static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::p
     for (const auto& overlay : RuntimeRiivolution::Overlays()) {
         const fs::path candidate = overlay.root / fs::path(normalized.substr(1));
         std::error_code ec;
-        if (fs::is_regular_file(candidate, ec)) {
+        if (WebHostFs::IsRegularFile(candidate, ec)) {
             return candidate;
         }
     }
@@ -708,7 +780,7 @@ static void BuildAndPublishRuntimeFst() {
     Memory::Write32(0x80000038u, fstAddress);
     Memory::Write32(0x8000003Cu, static_cast<uint32_t>(image.bytes.size()));
 
-    RT_LOG(RT_TAG_DVD) << "published " << image.entries.size() << " FST entries ("
+    RT_LOG_INFO(RT_TAG_DVD) << "published " << image.entries.size() << " FST entries ("
               << image.bytes.size() << " bytes) at 0x" << std::hex << fstAddress
               << " inside the boot-time MEM2 reservation" << std::dec << std::endl;
 
@@ -716,7 +788,7 @@ static void BuildAndPublishRuntimeFst() {
         std::ofstream dump(dumpPath, std::ios::binary);
         dump.write(reinterpret_cast<const char*>(image.bytes.data()),
                    static_cast<std::streamsize>(image.bytes.size()));
-        RT_LOG(RT_TAG_DVD) << "dumped published FST to " << dumpPath << std::endl;
+        RT_LOG_INFO(RT_TAG_DVD) << "dumped published FST to " << dumpPath << std::endl;
     }
 }
 
@@ -831,7 +903,7 @@ extern "C" void DVDInit_8009B160()
     for (auto overlay = overlays.rbegin(); overlay != overlays.rend(); ++overlay) {
         ScanOverlayRoot(*overlay);
     }
-    RT_LOG(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
+    RT_LOG_INFO(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
               << (g_fileEntries.size() - vanillaEntryCount) << " overlay registration(s) from "
               << overlays.size() << " root(s)" << std::endl;
 

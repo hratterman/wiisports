@@ -1,6 +1,7 @@
 #include "platform/host_platform.h"
 
 #include <cstdlib>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -46,6 +47,22 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
+#elif defined(__linux__)
+    std::vector<char> buffer(256);
+    for (;;) {
+        const auto length = ::readlink("/proc/self/exe", buffer.data(), buffer.size());
+        if (length < 0) {
+            return std::nullopt;
+        }
+        if (static_cast<std::size_t>(length) < buffer.size()) {
+            return std::filesystem::path(std::string(buffer.data(), length)).parent_path();
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#elif defined(__EMSCRIPTEN__)
+    // The product link embeds the files that sit beside a native executable (dsp_coef.bin,
+    // wii_bootstrap/) at this in-memory path.
+    return std::filesystem::path("/app");
 #else
     return std::nullopt;
 #endif
@@ -66,11 +83,22 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
     }
+#elif defined(__EMSCRIPTEN__)
+    // Same place RuntimeConfigFile::ApplicationDataDirectory() resolves to on the web (the
+    // generic XDG branch). $HOME (/home/web_user) is persisted per client in IndexedDB.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".local" / "share" / applicationName;
+    }
 #endif
     return std::filesystem::current_path() / applicationName;
 }
 
 std::filesystem::path LogDirectory(std::string_view applicationName) {
+#if defined(__EMSCRIPTEN__)
+    // Not under $HOME: the page persists $HOME to IndexedDB after every write, and run logs
+    // would grow that store without bound. The browser console is the web log anyway.
+    return std::filesystem::path("/tmp") / applicationName / "Logs";
+#endif
     return ApplicationDataDirectory(applicationName) / "Logs";
 }
 

@@ -38,6 +38,9 @@
 #include "netplay/live.h"
 #include "aurora_events.h"
 #include "guest_clock.h"
+#if defined(__EMSCRIPTEN__)
+#include "web_phone.h"
+#endif
 extern "C" int g_gxFrameCount;
 extern "C" void func_800CFCB0(CpuContext*);
 extern "C" void func_800CE180(CpuContext*);
@@ -353,12 +356,58 @@ struct HostInput {
     int w = 1, h = 1;
 };
 
+#if defined(__EMSCRIPTEN__)
+// [web] A linked phone (web_phone.h) takes the DualSense's place: same SDL axes, same timestamped
+// sensor queue, so StepController and the game's own MotionPlus solver treat it identically.
+// Pseudo joystick IDs above any SDL hands out, one per link generation, so a relink resets the remote.
+constexpr SDL_JoystickID kPhoneIdBase = 0x70000000u;
+
+SDL_JoystickID PhoneId() {
+    return WebPhone::Connected() ? kPhoneIdBase + (WebPhone::Generation() & 0x0FFFFFFFu) : 0;
+}
+
+void ReadPhone(HostInput& in) {
+    Remote& r = CurrentRemote();
+    in.controller = true;
+    in.focused = !InputBindings::InputBlocked();
+    WebPhone::Drain([&](const WebPhone::Report& report) {
+        const Vec3 gyro{report.gyro[0], report.gyro[1], report.gyro[2]};
+        const Vec3 acc{report.acc[0], report.acc[1], report.acc[2]};
+        if (!std::isfinite(gyro.x) || !std::isfinite(gyro.y) || !std::isfinite(gyro.z) ||
+            !std::isfinite(acc.x) || !std::isfinite(acc.y) || !std::isfinite(acc.z) ||
+            !in.focused || Len(gyro) >= 40 || Len(acc) >= 60) {
+            return;
+        }
+        r.sensorAcc = ResortMotion::kpadAccel(acc);
+        if (r.sensors.size() == 512) r.sensors.pop_front();
+        r.sensors.push_back({report.timeNs, ResortMotion::bodyGyro(gyro), r.sensorAcc});
+        in.gyro = ResortMotion::bodyGyro(gyro);
+        in.acc = r.sensorAcc;
+        in.accValid = Len(in.acc) > 0.2 && Len(in.acc) < 5.0;
+    });
+    if (!in.focused) {
+        r.sensors.clear(); r.sensorTime = 0; r.binTime = 0; r.binGyro = {};
+        return;
+    }
+    in.hold = WebPhone::Buttons() & (kBtnLeft | kBtnRight | kBtnDown | kBtnUp | kBtnPlus | kBtn2 | kBtn1 |
+                                     kBtnB | kBtnA | kBtnMinus | kBtnHome);
+    in.recenter = (WebPhone::Flags() & WebPhone::kFlagRecenter) != 0;
+    in.shake = (WebPhone::Flags() & WebPhone::kFlagShake) != 0;
+}
+#endif
+
 HostInput ReadHost() {
     HostInput in;
     in.window = SDL_GetKeyboardFocus();
     in.focused = in.window != nullptr && !InputBindings::InputBlocked();
+#if defined(__EMSCRIPTEN__)
+    const SDL_JoystickID phoneId = PhoneId();
+    SDL_Gamepad* pad = phoneId ? nullptr : DualSenseGamepad();
+    const SDL_JoystickID padId = phoneId ? phoneId : pad ? SDL_GetGamepadID(pad) : 0;
+#else
     SDL_Gamepad* pad = DualSenseGamepad();
     const SDL_JoystickID padId = pad ? SDL_GetGamepadID(pad) : 0;
+#endif
     if (padId != CurrentRemote().activeGamepad) {
         CurrentRemote().activeGamepad = padId;
         CurrentRemote().yaw = CurrentRemote().pitch = CurrentRemote().roll = 0;
@@ -377,6 +426,12 @@ HostInput ReadHost() {
         CurrentRemote().recenterHeld = false;
         if (in.window) SDL_SetWindowRelativeMouseMode(in.window, false);
     }
+#if defined(__EMSCRIPTEN__)
+    if (phoneId) {
+        ReadPhone(in);
+        return in;
+    }
+#endif
     if (pad && !in.focused) {
         in.controller=true;
         CurrentRemote().sensors.clear();CurrentRemote().sensorTime=0;
@@ -911,11 +966,15 @@ bool DualSenseActive() { return VirtualRemoteActive(0) && DualSenseGamepad() != 
 const char* ActiveInputName() {
     if (Tape::Replaying()) return "Motion input playback";
     if (WiiRemoteInput::IsRemoteChannel(0)) return "Wii Remote (Bluetooth)";
+#if defined(__EMSCRIPTEN__)
+    if (VirtualRemoteActive(0) && WebPhone::Connected()) return "Phone motion";
+#endif
     return DualSenseActive() ? "DualSense gyro" : "Keyboard and mouse";
 }
 
 void HandleSdlEvent(const SDL_Event& ev) {
     if (Tape::Replaying()) return;
+    // A linked phone's activeGamepad is a pseudo ID, so no SDL sensor event matches it.
     if (ev.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE && ev.gsensor.which == g_local.activeGamepad &&
         !InputBindings::InputBlocked()) {
         const auto& e = ev.gsensor;

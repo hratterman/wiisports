@@ -15,14 +15,13 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <stdexcept>
+#include <cstdlib>
 #include <string_view>
 #include <utility>
 #include <vector>
 #include <toml.hpp>
 #include "platform/host_platform.h"
-#ifdef __EMSCRIPTEN__
-#include "hle/web_disc.h"
-#endif
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -45,7 +44,6 @@ struct RuntimeUserConfig {
     std::optional<std::string> graphicsApi;
     std::optional<std::string> displayMode;
     std::optional<uint32_t> frameInterpolationFps;
-    std::optional<bool> metalFxSpatialUpscaling;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
     std::optional<bool> textureReplacements;
@@ -171,10 +169,7 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 // Must stay in step with the backend table in main.cpp, which is what actually
 // maps these to AuroraBackend.
 inline bool IsSupportedGraphicsApi(std::string_view value) {
-#if defined(__EMSCRIPTEN__)
-    // The browser chooses the native API behind WebGPU; "webgpu" is the only (and auto) choice.
-    static constexpr std::array<std::string_view, 2> values{"auto", "webgpu"};
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
 // only vulkan for linux
 #elif defined(__linux__)
@@ -212,7 +207,7 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
-#elif defined(__APPLE__) || defined(__EMSCRIPTEN__)
+#elif defined(__APPLE__)
     return RuntimePlatform::ExecutableDirectory();
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
@@ -261,6 +256,13 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
 }
 
 inline std::filesystem::path ApplicationDataDirectory() {
+    // Session brokers isolate mutable state while sharing the installed binary
+    // and its immutable assets. UTF-8 is needed for Windows user/profile paths.
+    if (const char* overridePath = std::getenv("RESORT_USERDATA_DIR"); overridePath && *overridePath) {
+        const auto path = PathFromUtf8(overridePath);
+        if (!path.is_absolute()) throw std::invalid_argument("RESORT_USERDATA_DIR must be absolute");
+        return path;
+    }
     if (const auto& portableRoot = PortableRootDirectory()) {
         return *portableRoot / kPortableUserDataDirectoryName;
     }
@@ -466,8 +468,6 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
             config.frameInterpolationFps = migrated;
         }
     }
-    config.metalFxSpatialUpscaling =
-        FindConfigValue<bool>(document, "video", "metalfx_spatial_upscaling");
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
@@ -669,11 +669,6 @@ inline bool SetFrameInterpolationFps(uint32_t value) {
     return WriteSetting("video", "frame_interpolation_fps", std::to_string(value));
 }
 
-inline bool SetMetalFxSpatialUpscaling(bool value) {
-    Mutable().metalFxSpatialUpscaling = value;
-    return WriteSetting("video", "metalfx_spatial_upscaling", value ? "true" : "false");
-}
-
 inline bool SetDisplayMode(std::string value) {
     if (!IsSupportedDisplayMode(value)) {
         return false;
@@ -829,10 +824,6 @@ inline float ResolutionMultiplier(float fallback = 1.0f) {
     return std::max(0.0f, Get().resolutionMultiplier.value_or(fallback));
 }
 
-inline bool MetalFxSpatialUpscaling(bool fallback = false) {
-    return Get().metalFxSpatialUpscaling.value_or(fallback);
-}
-
 inline float AudioVolume(float fallback = 1.0f) {
     return std::clamp(Get().audioVolume.value_or(fallback), 0.0f, 1.0f);
 }
@@ -966,13 +957,7 @@ inline std::string DisplayMode(std::string fallback = "windowed") {
 }
 
 inline bool NetworkEnabled(bool fallback = true) {
-#if defined(__EMSCRIPTEN__)
-    // Browsers have no raw sockets: the web build always runs offline.
-    (void)fallback;
-    return false;
-#else
     return Get().networkEnabled.value_or(fallback);
-#endif
 }
 
 inline std::string NandRoot(std::string fallback = "") {
@@ -1007,16 +992,6 @@ inline std::filesystem::path ResolvedDvdRoot() {
 
 /// The canonical Retro Rewind installation the frontend owns, or "" when none is recorded.
 inline std::string RetroRewindRoot(std::string fallback = "") {
-#if defined(__EMSCRIPTEN__)
-    // Web: the pack is streamed from the site as the WebDisc mod mount (/mods/<name>, from
-    // Module.mkwProduct.modRoot); Config.toml (in IndexedDB) normally names none. Callers apply
-    // it only for the Retro Rewind product.
-    if (fallback.empty()) {
-        if (const auto modRoot = WebDisc::ModRootPath()) {
-            fallback = modRoot->generic_string();
-        }
-    }
-#endif
     return Get().retroRewindRoot.value_or(std::move(fallback));
 }
 

@@ -44,25 +44,15 @@
 #include <signal.h>
 #if defined(__x86_64__)
 // Only the x86 POSIX fault path inspects ucontext_t to recover the page-fault
-// write bit. macOS exposes the signal-handler context through sys/ucontext.h;
-// avoid ucontext.h itself because its deprecated user-context APIs require
-// _XOPEN_SOURCE. The arm64 handler does not inspect a host context at all.
-#if defined(__APPLE__)
-#include <sys/ucontext.h>
-#else
+// write bit. macOS deprecates ucontext and requires _XOPEN_SOURCE just to
+// include the header, while the arm64 handler does not use it at all.
 #include <ucontext.h>
-#endif
 #endif
 #include <unistd.h>
 #endif
 
 #include "abi_bridge.h"
 #include "guest_flat_memory.h"
-#if defined(__EMSCRIPTEN__)
-// [web] web/js/library_mkw_host.js: shows a fatal report in the page's error overlay.
-extern "C" void mkw_host_report_fatal(const char* message);
-#include "web_input.h"
-#endif
 #include "gx_guest_write.h"
 #include "memory.h"
 #include "system_bridge.h"
@@ -73,6 +63,8 @@ extern "C" void mkw_host_report_fatal(const char* message);
 #include "fiber_manager.h"
 #include "hle_stubs.h"
 #include "runtime_config.h"
+#include "netplay/input_tape.h"
+#include "netplay/live.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
 #include "recomp_mod_loader.h"
@@ -184,10 +176,6 @@ struct ProcessTranscriptState {
 };
 
 std::filesystem::path GetDefaultRuntimeLogDirectory() {
-#if defined(__EMSCRIPTEN__)
-    // Keep run logs out of the IndexedDB-persisted $HOME (see RuntimePlatform::LogDirectory).
-    return std::filesystem::path("/tmp/WiiCompiled/Logs");
-#endif
     return RuntimeConfigFile::ApplicationDataDirectory() / "Logs";
 }
 
@@ -415,13 +403,6 @@ std::string ReadInstalledSetupVersion() {
 }
 
 void InitializeProcessTranscript(int argc, char** argv) {
-#if defined(__EMSCRIPTEN__)
-    // stdout/stderr already reach the browser console (and the page's error overlay); the
-    // pipe-pumping threads below do not exist in the single-threaded browser build.
-    (void)argc;
-    (void)argv;
-    return;
-#endif
     auto& state = GetProcessTranscriptState();
     if (state.initialized.exchange(true, std::memory_order_acq_rel)) {
         return;
@@ -794,12 +775,6 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
                 message.append("\n\n[Additional details were written to the crash log.]");
             }
         }
-#if defined(__EMSCRIPTEN__)
-        // [web] The page's error overlay is the dialog; the console holds the diagnostic.
-        message.append("\n\nSee the browser console for the full diagnostic.");
-        RT_LOGF(RT_TAG_RUNTIME, "fatal dialog: %s\n", message.c_str());
-        mkw_host_report_fatal(message.c_str());
-#else
         message.append("\n\nSee the WiiCompiled Logs folder for the full diagnostic.");
 #if defined(_WIN32)
         ::MessageBoxA(nullptr, message.c_str(), "WiiCompiled - Fatal Error",
@@ -808,7 +783,6 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
         // The shipped product is Windows-first. Keep non-Windows builds safe
         // and retain the console diagnostic when no native dialog is available.
         RT_LOGF(RT_TAG_RUNTIME, "fatal dialog: %s\n", message.c_str());
-#endif
 #endif
     } catch (...) {
         // Reporting a crash must never throw or mask the original failure.
@@ -862,12 +836,8 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
                               const char* message, unsigned int len) {
     const std::string_view moduleView = module != nullptr ? std::string_view(module) : std::string_view{};
     const std::string_view messageView = message != nullptr ? std::string_view(message, len) : std::string_view{};
-    // Debug/info lines are progress notes: on the web they go to stdout (console.log) so the
-    // page does not report them as errors. Warnings and worse stay on stderr; native builds
-    // keep everything on stderr.
-    std::ostream& out = (level == LOG_DEBUG || level == LOG_INFO) ? RT_INFO_STREAM : std::cerr;
-    out << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
-        << messageView << std::endl;
+    std::cerr << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
+              << messageView << std::endl;
     if (level == LOG_FATAL) {
         ShowRuntimeFatalPopup("Aurora reported a fatal renderer error", messageView);
     }
@@ -1160,11 +1130,7 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
     // error code x86 pushes on a page fault records whether it was a write.
     if (ucontextVoid != nullptr) {
         auto* uc = static_cast<ucontext_t*>(ucontextVoid);
-#if defined(__APPLE__)
-        isWrite = uc->uc_mcontext != nullptr && (uc->uc_mcontext->__es.__err & 0x2) != 0;
-#else
         isWrite = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
-#endif
     }
 #endif
 
@@ -1277,6 +1243,17 @@ void SetRuntimeExitCode(int code) {
 
 // Global handler called via atexit() to flush buffers before any exit
 static void AtExitHandler() {
+    // OSExit uses std::exit instead of returning to RuntimeMain. Only seal a
+    // successful exit; crashes must retain their missing-end-marker status.
+    if (g_exitCodeSet.load(std::memory_order_relaxed) &&
+        g_lastExitCode.load(std::memory_order_relaxed) == 0 &&
+        !g_fatalErrorReported.load(std::memory_order_acquire)) {
+        try {
+            Riisorted::Netplay::InputTape::Finish();
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "[riisorted] motion tape finalization failed: %s\n", ex.what());
+        }
+    }
     // End-of-run guest memory report. This runs before the fatal-report check
     // below because the counters describe the whole session and are just as
     // interesting after a crash as after a clean exit.
@@ -1363,6 +1340,8 @@ int RuntimeMain(int argc, char** argv) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
         RuntimeConfigFile::LogLoadedConfig();
+        Riisorted::Netplay::InputTape::InitializeFromEnvironment();
+        Riisorted::Netplay::Live::InitializeFromEnvironment();
         if (RuntimeConfigFile::DiscordPresenceEnabled()) {
             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
         }
@@ -1419,12 +1398,7 @@ int RuntimeMain(int argc, char** argv) {
             const char* configName;
             AuroraBackend backend;
         };
-#if defined(__EMSCRIPTEN__)
-        // [web] aurora reports the browser's WebGPU as BACKEND_WEBGPU.
-        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
-            {"auto", BACKEND_AUTO}, {"webgpu", BACKEND_WEBGPU},
-        }};
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};
@@ -1461,10 +1435,6 @@ int RuntimeMain(int argc, char** argv) {
         // aurora_initialize does; a Bluetooth Wii Remote paired before launch must be
         // visible on that first scan.
         WiiRemoteInput::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled(true));
-#if defined(__EMSCRIPTEN__)
-        // [web] Keyboard on port 1 with no setup, merged with a gamepad there; page input view.
-        WebInput::Initialize();
-#endif
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
@@ -1477,7 +1447,7 @@ int RuntimeMain(int argc, char** argv) {
                       << backendDisplayName(auroraInfo.backend)
                       << "\". See the [aurora::gpu] lines above for the reason." << std::endl;
         } else {
-            RT_LOG_INFO(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
+            RT_LOG(RT_TAG_RUNTIME) << "graphics backend: " << backendDisplayName(auroraInfo.backend)
                       << std::endl;
         }
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
@@ -1485,7 +1455,7 @@ int RuntimeMain(int argc, char** argv) {
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
-        RT_LOG_INFO(RT_TAG_CONFIG) << "video.widescreen=" << (configWidescreen ? "true" : "false")
+        RT_LOG(RT_TAG_CONFIG) << "video.widescreen=" << (configWidescreen ? "true" : "false")
                   << " force_16_9=" << (forceAspect169 ? "true" : "false")
                   << " SCGetAspectRatio=" << (configWidescreen || forceAspect169 ? 1 : 0)
                   << " resolutionMultiplier=" << resolutionMultiplier
@@ -1526,6 +1496,7 @@ int RuntimeMain(int argc, char** argv) {
         WindowPlacementPersistence::Flush(true);
         aurora_shutdown();
         DiscordPresence::Shutdown();
+        Riisorted::Netplay::InputTape::Finish();
         SetRuntimeExitCodeImpl(0);
         ShutdownProcessTranscript();
         return 0;

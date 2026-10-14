@@ -5,8 +5,7 @@
 namespace MusicAttenuation {
 
 // Enables the optional external-media integration (Windows media sessions,
-// Core Audio output activity on macOS, or MPRIS over D-Bus on Linux).
-// The monitor is started lazily the first time
+// or MPRIS over D-Bus on Linux). The monitor is started lazily the first time
 // this is enabled.
 void SetEnabled(bool enabled) noexcept;
 void SetMusicVolume(float volume) noexcept;

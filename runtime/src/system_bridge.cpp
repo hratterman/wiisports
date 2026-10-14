@@ -317,7 +317,7 @@ void SystemBridge::Initialize() {
 
     // Initialize from the embedded DOL/REL data sections. This provides the
     // initial memory state for .data, .rodata, .sdata, etc.
-    RT_LOG_INFO(RT_TAG_RUNTIME) << "Initializing data sections from embedded DOL/REL data" << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "Initializing data sections from embedded DOL/REL data" << std::endl;
     InitializeDataSections();
 
     // Constructors run before the main entry point, but they still require the
@@ -332,10 +332,10 @@ void SystemBridge::Initialize() {
 
     // Run main DOL static constructors first
     // These set up vtables and other critical infrastructure
-    RT_LOG_INFO(RT_TAG_RUNTIME) << "Running static constructors for main DOL..." << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for main DOL..." << std::endl;
 
-    const uint32_t dolCtorStart = 0x80244DE0;
-    const uint32_t dolCtorEnd = 0x80244EA0;
+    const uint32_t dolCtorStart = 0x806542C0;
+    const uint32_t dolCtorEnd = 0x80654860;
 
     int dolCount = 0;
     for (uint32_t addr = dolCtorStart; addr < dolCtorEnd; addr += 4) {
@@ -368,10 +368,10 @@ void SystemBridge::Initialize() {
             g_sehJumpTarget = nullptr;
         }
     }
-    RT_LOG_INFO(RT_TAG_RUNTIME) << "Executed " << dolCount << " main DOL static constructors." << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "Executed " << dolCount << " main DOL static constructors." << std::endl;
 
     // StaticR.rel ctors must be run manually since we aren't using OSLink
-    RT_LOG_INFO(RT_TAG_RUNTIME) << "Running static constructors for StaticR.rel..." << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for StaticR.rel..." << std::endl;
 
     // Define range for StaticR.rel .ctors
     const uint32_t ctorStart = 0x8088f400;
@@ -409,7 +409,7 @@ void SystemBridge::Initialize() {
         }
     }
     g_suppressSehReporting = false;
-    RT_LOG_INFO(RT_TAG_RUNTIME) << "Executed " << count << " static constructors." << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "Executed " << count << " static constructors." << std::endl;
 }
 
 void SystemBridge::WriteGuestMemorySnapshot(std::ostream& os, const std::filesystem::path& mem1Path) {
@@ -484,15 +484,17 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
     };
 
     std::vector<SeedEntry> entries;
-    constexpr uint32_t kMem1ArenaLoDefault = 0x80399180u;
+    constexpr uint32_t kMem1ArenaLoDefault = 0x807E9080u;  // WSR __ArenaLo (OSInit: lis 0x807F / addi -0x6F80); MKW was 0x80399180
     uint32_t mem1ArenaHiDefault = 0x817f0520u;
     constexpr uint32_t kBusClockHz =
         static_cast<uint32_t>(TimeBaseContract::kBusClockHz);
     constexpr uint32_t kCpuClockHz = kBusClockHz * 3u;
-    // Mario Kart Wii boots under IOS36. These are the IOS kernel values that
-    // Dolphin exposes in low memory for IOS36 (VersionInfo.cpp). SDK helpers
-    // read them through the 0xC0000000 MEM1 alias.
-    constexpr uint32_t kIos36Version = 0x00240E18u;
+    // Wii Sports Resort (RZTP01) boots under IOS55 (TMD system version 0x0000000100000037).
+    // These are the IOS kernel values Dolphin exposes in low memory for IOS55 v5663
+    // (VersionInfo.cpp). SDK helpers read them through the 0xC0000000 MEM1 alias.
+    // OSInit compares 0x80003140 (running IOS) with 0x80003188 (IOS the title expects, written
+    // by the apploader from the TMD) and calls OSFatal when they disagree.
+    constexpr uint32_t kIos36Version = 0x0037161Fu;  // name kept for the MKW code below: IOS55 v5663
     constexpr uint32_t kIos36Date = 0x00030110u;
 
     constexpr uint32_t kMem2LoFloor = 0x90000800u;
@@ -508,10 +510,10 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
     // Retro Rewind reads the region byte directly from here while building its
     // Retro-WFC payload URL, and OSGetAppGamename reads the app code mirrors
     // at 0x80003180/0x80003194 while building NAS auth fields.
-    entries.push_back({0x80000000u, 0x524D4350u, "Disc game code"}); // RMCP
+    entries.push_back({0x80000000u, 0x525A5450u, "Disc game code"}); // RMCP
     entries.push_back({0x80000004u, 0x30310100u, "Disc maker/id"});  // 01 + disc 1
-    entries.push_back({0x80003180u, 0x524D4350u, "OS app game code"}); // RMCP
-    entries.push_back({0x80003194u, 0x524D4350u, "OS app gamename"});  // RMCP
+    entries.push_back({0x80003180u, 0x525A5450u, "OS app game code"}); // RMCP
+    entries.push_back({0x80003194u, 0x525A5450u, "OS app gamename"});  // RMCP
     if (RuntimeProduct::IsRetroRewind()) {
         entries.push_back({0x800017D8u, 0x00000001u, "Retro Rewind recomp runtime marker", true});
     }
@@ -530,10 +532,15 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
     }
 
     // Seed OS clock values used by SDK timing helpers (OSBusClock/OSClock).
+    // Resortcompiled: 0x800000CC is the console's TV format (set by the IPL: 0 NTSC, 1 PAL, 5 EURGB60).
+    // WSR's OS font code (OSGetFontEncode/OSLoadFont) reads the VI DTV register 0xCC00206E when it is 0,
+    // which has no HLE backing. A PAL console reports EURGB60 here; keeps the port at 60 Hz.
+    entries.push_back({0x800000CCu, 5u, "TV format (EURGB60)"});
     entries.push_back({0x800000F8u, kBusClockHz, "__OSBusClock"});
     entries.push_back({0x800000FCu, kCpuClockHz, "__OSClock"});
     entries.push_back({0x80003140u, kIos36Version, "IOS36 version"});
     entries.push_back({0x80003144u, kIos36Date, "IOS36 date"});
+    entries.push_back({0x80003188u, kIos36Version, "Title's expected IOS version (apploader/TMD)"});
 
     if (mem1Size != 0) {
         const uint32_t mem1End = Memory::kMem1CachedBase + mem1Size;
@@ -588,14 +595,14 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
     }
 
     if (seededCount != 0) {
-        RT_LOG_INFO(RT_TAG_RUNTIME) << "Seeded " << seededCount << " low-memory default(s)" << std::endl;
+        RT_LOG(RT_TAG_RUNTIME) << "Seeded " << seededCount << " low-memory default(s)" << std::endl;
     }
 
     if (patchedAny && mem2Size != 0) {
         const uint32_t patchedLo = Memory::Read32(0x80003124u);
         const uint32_t patchedHi = Memory::Read32(0x80003128u);
         const uint32_t patchedSize = Memory::Read32(0x8000311Cu);
-        RT_LOG_INFO(RT_TAG_RUNTIME) << "MEM2 defaults active -> size=" << (patchedSize / (1024 * 1024))
+        RT_LOG(RT_TAG_RUNTIME) << "MEM2 defaults active -> size=" << (patchedSize / (1024 * 1024))
                   << " MB, arena 0x" << std::hex << std::uppercase << patchedLo
                   << " - 0x" << patchedHi << std::dec << std::nouppercase << std::endl;
     }

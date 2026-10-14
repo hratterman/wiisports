@@ -4,12 +4,10 @@
 #include "isa/ppc_isa_cr.h"
 #include "memory.h"
 #include "runtime_log.h"
-#include "timebase_contract.h"
-#include "platform/web_host.h"
+#include "guest_clock.h"
 
 #include <array>
 #include <bitset>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -43,15 +41,8 @@ std::bitset<2048> g_warnedSprWrite{};
 std::array<uint32_t, 2048> g_sprShadow{};
 uint32_t g_reservationAddr = 0;
 bool g_hasReservation = false;
-const auto g_timeBaseStart = std::chrono::steady_clock::now();
-
 uint64_t GetTimeBase() {
-    // The browser build parks the guest while the page is hidden; that time never happened for it.
-    const auto elapsed = std::chrono::steady_clock::now() - g_timeBaseStart -
-                         std::chrono::nanoseconds(WebHost::ParkedNanos());
-    const auto nanoseconds =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
-    return TimeBaseContract::NanosecondsToTicks(static_cast<uint64_t>(nanoseconds));
+    return GuestClock::ReadTimeBase();
 }
 
 constexpr uint32_t kFpscrFx = 1u << 31;
@@ -836,8 +827,8 @@ extern "C" double PPC_PsqL(uint32_t addr, uint32_t w, uint32_t i)
     }
 
     const uint32_t gqr = cpu->gqr[i & 7];
-    return w == 0 ? PPC_PsqLStateFallback<0u, false>(gqr, addr)
-                  : PPC_PsqLStateFallback<1u, false>(gqr, addr);
+    return w == 0 ? PPC_PsqLStateFallback<0u, 0u, false>(gqr, addr)
+                  : PPC_PsqLStateFallback<1u, 0u, false>(gqr, addr);
 }
 
 extern "C" void PPC_PsqSt(uint32_t addr, double value, uint32_t w, uint32_t i)
@@ -851,11 +842,11 @@ extern "C" void PPC_PsqSt(uint32_t addr, double value, uint32_t w, uint32_t i)
     const uint32_t gqr = cpu->gqr[i & 7];
     if (w == 0)
     {
-        PPC_PsqStStateFallback<0u, false>(gqr, addr, value);
+        PPC_PsqStStateFallback<0u, 0u, false>(gqr, addr, value);
     }
     else
     {
-        PPC_PsqStStateFallback<1u, false>(gqr, addr, value);
+        PPC_PsqStStateFallback<1u, 0u, false>(gqr, addr, value);
     }
 }
 

@@ -69,5 +69,7 @@ extern "C" uint32_t EGG_Decomp_decodeSZS_80218c2c(uint32_t src, uint32_t dst)
     return expandSize;
 }
 
-PPC_NATIVE_OVERRIDE(80218C2C, EGG_Decomp_decodeSZS_80218c2c, uint32_t,
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE(80218C2C, EGG_Decomp_decodeSZS_80218c2c, uint32_t,
                     (uint32_t src, uint32_t dst), (src, dst));
+#endif // RESORT-UNMAPPED

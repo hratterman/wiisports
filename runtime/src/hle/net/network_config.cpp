@@ -63,7 +63,9 @@ extern "C" void NHTTPStartup_Reentrant_HLE_801d8d30(CpuContext* ctx) {
     }
 }
 
-REGISTER_NATIVE_FUNCTION_AS(0x801D8D30, NHTTPStartup_Reentrant_HLE_801d8d30, "NHTTPStartup_Reentrant_HLE_801d8d30");
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_REGISTRATION_AS(0x801D8D30, NHTTPStartup_Reentrant_HLE_801d8d30, "NHTTPStartup_Reentrant_HLE_801d8d30");
+#endif // RESORT-UNMAPPED
 
 static void WriteNcdConfig(uint32_t addr, uint32_t len) {
     if (!addr || len == 0) {

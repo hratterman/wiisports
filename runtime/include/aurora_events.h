@@ -2,6 +2,7 @@
 
 #include "settings_overlay.h"
 #include "runtime_config.h"
+#include "netplay/input_tape.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -60,6 +61,15 @@ inline void Flush(bool force = false) {
 // still active.  A window close is an intentional successful exit, so end the
 // process directly and do not run the crash/atexit paths.
 [[noreturn]] inline void ExitForAuroraWindowClose() noexcept {
+    // Window close bypasses atexit when called on a guest fiber. Seal the input
+    // tape explicitly so a successful user exit has a verifiable end marker.
+    try {
+        Riisorted::Netplay::InputTape::Finish();
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "[riisorted] motion tape close failed: %s\n", ex.what());
+        std::fflush(stderr);
+        std::_Exit(EXIT_FAILURE);
+    }
     settings_overlay::ReleaseControllers();
     WindowPlacementPersistence::Flush(true);
 #if defined(_WIN32)

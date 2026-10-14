@@ -1,3 +1,4 @@
+#include "guest_clock.h"
 #include "hle_stubs.h"
 #include "memory.h"
 #include "abi_bridge.h"
@@ -8,7 +9,6 @@
 #include "fiber_manager.h"
 #include "platform/host_platform.h"
 #include "runtime_log.h"
-#include "audio_backend.h"
 
 #include <dolphin/vi.h>
 
@@ -30,16 +30,15 @@
 #endif
 
 #include <aurora/aurora.h>
-#include "platform/web_host.h"
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
-extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
+extern "C" void OSWakeupThread_HLE_8004ef10(CpuContext* ctx);
 
 // Forward declaration for OSSleepThread - used by VIWaitForRetrace HLE
-extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* cpu);
+extern "C" void OSSleepThread_HLE_8004ee20(CpuContext* cpu);
 extern "C" int g_gxFrameCount;
-extern "C" int32_t OS__DisableInterrupts_801a65ac();
-extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
+extern "C" int32_t OS__DisableInterrupts_8004af10();
+extern "C" int32_t OS__RestoreInterrupts_8004af50(int32_t level);
 
 // Aurora frame cycle tracking - needs external linkage for the GX HLE
 // (declared in gx_internal.h, consumed by gx_frame.cpp). We need to call
@@ -102,7 +101,7 @@ struct ViState {
     uint32_t xfbWidth = 640;
     uint32_t xfbHeight = 480;
     bool fieldOdd = false;
-    Clock::time_point lastRetrace = Clock::now();
+    Clock::time_point lastRetrace = GuestClock::SchedulingNow();
     std::chrono::microseconds retraceInterval{16666us}; // ~60 Hz
     bool hasValidXfb = false; // True once we've received at least one GXCopyDisp
     uint32_t readyXfb = 0;    // XFB address from the most recent GXCopyDisp
@@ -135,22 +134,22 @@ ViState g_vi;
 
 
 // Guest-side state addresses used by the SDK's VI globals.
-constexpr uint32_t kViInitializedFlagAddr   = 0x80386b38;
-constexpr uint32_t kViTvFormatAddr          = 0x80386ba8;
-constexpr uint32_t kViRenderWidthAddr       = 0x80350864;
-constexpr uint32_t kViRenderHeightAddr      = 0x80350866;
-constexpr uint32_t kViXfbWidthAddr          = 0x80350872;
-constexpr uint32_t kViXfbHeightAddr         = 0x8035087c;
-constexpr uint32_t kViRetraceCountAddr      = 0x80386be4; // matches VIWaitForRetrace/handler
-constexpr uint32_t kViTimingGuardAddr       = 0x80386b44;
-constexpr uint32_t kViPreRetraceCallback    = 0x80386bb8;
-constexpr uint32_t kViPostRetraceCallback   = 0x80386bb4;
-constexpr uint32_t kViNextFrameBufferAddr   = 0x80386ba0;
-constexpr uint32_t kViNextFrameBufferHwAddr = 0x80350890;
-constexpr uint32_t kViRetraceQueueAddr      = 0x80386bc0; // Thread queue for VIWaitForRetrace
+constexpr uint32_t kViInitializedFlagAddr   = 0x806f4828;
+constexpr uint32_t kViTvFormatAddr          = 0x806f4898;
+constexpr uint32_t kViRenderWidthAddr       = 0x80717E9C;
+constexpr uint32_t kViRenderHeightAddr      = 0x80717E9E;
+constexpr uint32_t kViXfbWidthAddr          = 0x80717EAA;
+constexpr uint32_t kViXfbHeightAddr         = 0x80717eb4;
+constexpr uint32_t kViRetraceCountAddr      = 0x806f48d4; // matches VIWaitForRetrace/handler
+constexpr uint32_t kViTimingGuardAddr       = 0x806f4834;
+constexpr uint32_t kViPreRetraceCallback    = 0x806f48a8;
+constexpr uint32_t kViPostRetraceCallback   = 0x806f48a4;
+constexpr uint32_t kViNextFrameBufferAddr   = 0x806f4890;
+constexpr uint32_t kViNextFrameBufferHwAddr = 0x80717EC8;
+constexpr uint32_t kViRetraceQueueAddr      = 0x806f48b0; // Thread queue for VIWaitForRetrace
 
 // EGG::BaseSystem::sSystem pointer - must be non-null before post-retrace callback is valid
-constexpr uint32_t kEggSSystemAddr = 0x80386F60;
+constexpr uint32_t kEggSSystemAddr = 0x806F5078;
 
 std::chrono::microseconds IntervalForFormat(uint32_t tvFormat) {
     // NTSC-ish defaults to 60 Hz; PAL uses 50 Hz.
@@ -163,18 +162,11 @@ constexpr std::chrono::microseconds kFinalSpinWindow{500};
 
 void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false,
                          std::chrono::microseconds spinWindow = 750us) {
+    deadline = GuestClock::ToHostTime(deadline);
     const auto now = Clock::now();
     if (now >= deadline) {
         return;
     }
-#if defined(__EMSCRIPTEN__)
-    // The browser build cannot block or spin the page's only thread: suspend until the deadline
-    // (timer, then macrotask hops for the final stretch, which also covers the spin window).
-    (void)finishWithSpin;
-    (void)spinWindow;
-    WebHost::SleepUntil(deadline);
-    return;
-#endif
     const auto timerDeadline =
         finishWithSpin && deadline - now > spinWindow ? deadline - spinWindow : deadline;
 #if defined(_WIN32)
@@ -254,7 +246,7 @@ void EnsureInitializedLocked() {
     }
     g_vi.initialized = true;
     g_vi.retraceInterval = IntervalForFormat(g_vi.tvFormat);
-    g_vi.lastRetrace = Clock::now();
+    g_vi.lastRetrace = GuestClock::SchedulingNow();
     WriteGuestStateLocked();
 }
 
@@ -262,33 +254,6 @@ void EnsureInitializedLocked() {
 // 5 EURGB60) in bits [4:2].
 uint32_t ExtractTvFormat(uint32_t tvMode) {
     return (tvMode >> 2) & 0x7;
-}
-
-// Browser build: while the page is hidden, park the whole guest here (WebHost::WaitWhilePageHidden
-// suspends the only stack until the page is visible again) instead of simulating a console nobody
-// can see. Called at frame and retrace boundaries. Audio output pauses with it, and the VI retrace
-// grid moves forward by the parked time so no retraces are "caught up" on resume. Returns the
-// parked time (zero when visible, always zero natively).
-Clock::duration ParkWhilePageHidden() {
-#if defined(__EMSCRIPTEN__)
-    if (!WebHost::PageHidden()) {
-        return {};
-    }
-    RT_LOG(RT_TAG_VI) << "page hidden: pausing the game until it is visible again" << std::endl;
-    AudioBackend::Instance().SetOutputPaused(true);
-    const auto parked = std::chrono::duration_cast<Clock::duration>(WebHost::WaitWhilePageHidden());
-    AudioBackend::Instance().SetOutputPaused(false);
-    {
-        std::lock_guard<std::mutex> lock(g_viMutex);
-        g_vi.lastRetrace += parked;
-    }
-    RT_LOG(RT_TAG_VI) << "page visible: resumed after "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(parked).count() << " ms"
-                      << std::endl;
-    return parked;
-#else
-    return {};
-#endif
 }
 
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread
@@ -355,7 +320,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     // The retrace count has been incremented and written to guest memory.
     if (ctx) {
         ctx->gpr[3] = kViRetraceQueueAddr;
-        OSWakeupThread_HLE_801aaaa4(ctx);
+        OSWakeupThread_HLE_8004ef10(ctx);
     }
 
     if (serviceAurora) {
@@ -417,16 +382,10 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
 bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 {
     bool advancedAny = false;
-    // Retrace boundaries keep coming while the game is loading or otherwise not presenting, so this
-    // is the fallback park point (frame presents park in VI_HLE_PresentFrame). Only on the paths that
-    // own Aurora: the deferred path runs inside a native GX call.
-    if (serviceAurora) {
-        (void)ParkWhilePageHidden();
-    }
 
     for (int catchUpCount = 0; catchUpCount < maxToProcess; ++catchUpCount) {
         Clock::time_point target;
-        auto now = Clock::now();
+        auto now = GuestClock::SchedulingNow();
         {
             std::lock_guard<std::mutex> lock(g_viMutex);
             if (!g_vi.initialized) {
@@ -504,7 +463,7 @@ void VI_HLE_WaitForNextRetracePoll() {
         retraceDeadline = g_vi.lastRetrace + g_vi.retraceInterval;
     }
 
-    const auto now = Clock::now();
+    const auto now = GuestClock::SchedulingNow();
     if (now >= retraceDeadline) {
         return;
     }
@@ -533,7 +492,7 @@ uint64_t s_lastPresentAnchorNanos = 0;
 void PaceToRetraceBoundary(Clock::time_point deadline) {
     constexpr auto kServiceSlice = 1ms;
     for (;;) {
-        const auto now = Clock::now();
+        const auto now = GuestClock::SchedulingNow();
         if (now >= deadline) {
             break;
         }
@@ -578,7 +537,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             retraceCount = g_vi.retraceCount;
             baseNanos = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    g_vi.lastRetrace.time_since_epoch())
+                    GuestClock::ToHostTime(g_vi.lastRetrace).time_since_epoch())
                     .count());
             intervalNanos = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(g_vi.retraceInterval)
@@ -620,27 +579,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         aurora_set_present_schedule(0, 0);
     }
 
-    // A frame is only sealed if one was begun. Begin can fail (window hidden or minimized, surface
-    // being recreated, render targets not created yet); every GX command since was dropped, and
-    // ending the never-begun frame used to unmap and rotate a staging buffer this frame never
-    // mapped. Skip the seal and keep the pacing.
-    if (g_auroraFrameActive.load(std::memory_order_acquire)) {
-        aurora_end_frame();
-        WebHost::NoteFramePresented();
-    } else {
-        static uint32_t s_skippedPresentCount = 0;
-        if (s_skippedPresentCount < 16 || (s_skippedPresentCount & 1023) == 0) {
-            RT_LOGF(RT_TAG_VI, "present skipped: no active Aurora frame (n=%u)\n", s_skippedPresentCount + 1);
-        }
-        ++s_skippedPresentCount;
-    }
-    // Browser build: give the page a turn every frame so the canvas presents and input arrives
-    // even when the frame ran late and pacing below has nothing left to wait for. No-op natively.
-    WebHost::Yield();
-    // Browser build: a hidden page parks here, between frames, until it is visible again.
-    if (const auto parked = ParkWhilePageHidden(); parked != Clock::duration::zero()) {
-        paceDeadline += parked;
-    }
+    aurora_end_frame();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
         std::lock_guard<std::mutex> lock(g_viMutex);
@@ -682,12 +621,12 @@ void VI_HLE_SetXfbReady(uint32_t xfbAddr) {
     }
 }
 
-// VIInit (0x801B94A4) and its lower-level helper __VIInit (0x801B9294) both
+// VIInit (0x80056BA0) and its lower-level helper __VIInit (0x800569A0) both
 // program MMIO at 0xCC0020xx on hardware. We skip all hardware access and seed
 // the same defaults instead, so the two entry points share one body.
 static void SeedViStateForInit(CpuContext* ctx, const char* who)
 {
-    RT_LOG_INFO(RT_TAG_VI) << who << " called: seeding VI state (HLE)" << std::endl;
+    RT_LOG(RT_TAG_VI) << who << " called: seeding VI state (HLE)" << std::endl;
     {
         std::lock_guard<std::mutex> lock(g_viMutex);
         EnsureInitializedLocked();
@@ -695,47 +634,47 @@ static void SeedViStateForInit(CpuContext* ctx, const char* who)
     ViSetR3(ctx, 0);
 }
 
-extern "C" void VIInit_HLE_801b94a4(CpuContext* ctx)
+extern "C" void VIInit_HLE_80056ba0(CpuContext* ctx)
 {
-    SeedViStateForInit(ctx, "VIInit_801b94a4");
+    SeedViStateForInit(ctx, "VIInit_80056ba0");
 }
-PPC_NATIVE_OVERRIDE_VOID(801B94A4, VIInit_HLE_801b94a4, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80056BA0, VIInit_HLE_80056ba0, (CpuContext* ctx), (ctx));
 
-extern "C" void __VIInit_HLE_801b9294(CpuContext* ctx)
+extern "C" void __VIInit_HLE_800569a0(CpuContext* ctx)
 {
-    SeedViStateForInit(ctx, "__VIInit_801b9294");
+    SeedViStateForInit(ctx, "__VIInit_800569a0");
 }
-PPC_NATIVE_OVERRIDE_VOID(801B9294, __VIInit_HLE_801b9294, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800569A0, __VIInit_HLE_800569a0, (CpuContext* ctx), (ctx));
 
 // -----------------------------------------------------------------------------
 // Helper stubs referenced by VIInit switch cases (case D variants).
 // These are hardware-specific; treat as no-ops to keep control flow intact.
 // -----------------------------------------------------------------------------
-extern "C" void VIInit_caseD_0_HLE_801b9934(CpuContext* ctx)
+extern "C" void VIInit_caseD_0_HLE_80057034(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_0_801b9934 stubbed" << std::endl;
+    RT_LOG(RT_TAG_VI) << "VIInit_caseD_0_80057034 stubbed" << std::endl;
 }
-PPC_NATIVE_OVERRIDE_VOID(801B9934, VIInit_caseD_0_HLE_801b9934, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80057034, VIInit_caseD_0_HLE_80057034, (CpuContext* ctx), (ctx));
 
-extern "C" void VIInit_caseD_1_HLE_801b993c(CpuContext* ctx)
+extern "C" void VIInit_caseD_1_HLE_8005703c(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_1_801b993c stubbed" << std::endl;
+    RT_LOG(RT_TAG_VI) << "VIInit_caseD_1_8005703c stubbed" << std::endl;
 }
-PPC_NATIVE_OVERRIDE_VOID(801B993C, VIInit_caseD_1_HLE_801b993c, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(8005703C, VIInit_caseD_1_HLE_8005703c, (CpuContext* ctx), (ctx));
 
-extern "C" void VIInit_caseD_2_HLE_801b9944(CpuContext* ctx)
+extern "C" void VIInit_caseD_2_HLE_80057044(CpuContext* ctx)
 {
     (void)ctx;
-    RT_LOG_INFO(RT_TAG_VI) << "VIInit_caseD_2_801b9944 stubbed" << std::endl;
+    RT_LOG(RT_TAG_VI) << "VIInit_caseD_2_80057044 stubbed" << std::endl;
 }
-PPC_NATIVE_OVERRIDE_VOID(801B9944, VIInit_caseD_2_HLE_801b9944, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80057044, VIInit_caseD_2_HLE_80057044, (CpuContext* ctx), (ctx));
 
 // -----------------------------------------------------------------------------
-// VISetPreRetraceCallback (0x801B90F4)
+// VISetPreRetraceCallback (0x800567E0)
 // -----------------------------------------------------------------------------
-extern "C" void VISetPreRetraceCallback_HLE_801b90f4(CpuContext* ctx)
+extern "C" void VISetPreRetraceCallback_HLE_800567e0(CpuContext* ctx)
 {
     const uint32_t newCb = ctx ? ctx->gpr[3] : 0;
     uint32_t prev = 0;
@@ -748,12 +687,12 @@ extern "C" void VISetPreRetraceCallback_HLE_801b90f4(CpuContext* ctx)
     }
     ViSetR3(ctx, prev);
 }
-PPC_NATIVE_OVERRIDE_VOID(801B90F4, VISetPreRetraceCallback_HLE_801b90f4, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800567E0, VISetPreRetraceCallback_HLE_800567e0, (CpuContext* ctx), (ctx));
 
 // -----------------------------------------------------------------------------
-// VISetPostRetraceCallback (0x801B9138)
+// VISetPostRetraceCallback (0x80056830)
 // -----------------------------------------------------------------------------
-extern "C" void VISetPostRetraceCallback_HLE_801b9138(CpuContext* ctx)
+extern "C" void VISetPostRetraceCallback_HLE_80056830(CpuContext* ctx)
 {
     const uint32_t newCb = ctx ? ctx->gpr[3] : 0;
     uint32_t prev = 0;
@@ -766,22 +705,22 @@ extern "C" void VISetPostRetraceCallback_HLE_801b9138(CpuContext* ctx)
     }
     ViSetR3(ctx, prev);
 }
-PPC_NATIVE_OVERRIDE_VOID(801B9138, VISetPostRetraceCallback_HLE_801b9138, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80056830, VISetPostRetraceCallback_HLE_80056830, (CpuContext* ctx), (ctx));
 
 // -----------------------------------------------------------------------------
-// VIGetDTVStatus (0x801BAD38)
+// VIGetDTVStatus (0x80058430)
 // Reads DTV status from VI hardware (MMIO 0xCC00206E). Stub to "not ready".
 // -----------------------------------------------------------------------------
-extern "C" void VIGetDTVStatus_HLE_801bad38(CpuContext* ctx)
+extern "C" void VIGetDTVStatus_HLE_80058430(CpuContext* ctx)
 {
     ViSetR3(ctx, 0); // return 0 -> not ready / disabled
 }
-PPC_NATIVE_OVERRIDE_VOID(801BAD38, VIGetDTVStatus_HLE_801bad38, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80058430, VIGetDTVStatus_HLE_80058430, (CpuContext* ctx), (ctx));
 
 // -----------------------------------------------------------------------------
 // VIConfigure & related helpers: translate GXRenderModeObj into guest globals.
 // -----------------------------------------------------------------------------
-extern "C" void VIConfigure_HLE_801b9f6c(CpuContext* ctx)
+extern "C" void VIConfigure_HLE_80057680(CpuContext* ctx)
 {
     // One read of the guest GXRenderModeObj serves both the VI pending state and
     // aurora, rather than unpacking the same 0x39 bytes twice.
@@ -818,9 +757,9 @@ extern "C" void VIConfigure_HLE_801b9f6c(CpuContext* ctx)
 
     ViSetR3(ctx, 0);
 }
-PPC_NATIVE_OVERRIDE_VOID(801B9F6C, VIConfigure_HLE_801b9f6c, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80057680, VIConfigure_HLE_80057680, (CpuContext* ctx), (ctx));
 
-extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
+extern "C" void VIFlush_HLE_800580b0(CpuContext* ctx)
 {
     uint32_t guestNextFb = 0;
     {
@@ -855,9 +794,9 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
 
     ViSetR3(ctx, 0);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BA9A4, VIFlush_HLE_801ba9a4, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800580B0, VIFlush_HLE_800580b0, (CpuContext* ctx), (ctx));
 
-extern "C" void VISetNextFrameBuffer_HLE_801baab8(CpuContext* ctx)
+extern "C" void VISetNextFrameBuffer_HLE_800581d0(CpuContext* ctx)
 {
     const uint32_t fbPtr = ctx ? ctx->gpr[3] : 0;
     {
@@ -870,9 +809,9 @@ extern "C" void VISetNextFrameBuffer_HLE_801baab8(CpuContext* ctx)
     }
     ViSetR3(ctx, 0);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BAAB8, VISetNextFrameBuffer_HLE_801baab8, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800581D0, VISetNextFrameBuffer_HLE_800581d0, (CpuContext* ctx), (ctx));
 
-extern "C" void VIGetNextFrameBuffer_HLE_801bab24(CpuContext* ctx)
+extern "C" void VIGetNextFrameBuffer_HLE_80058240(CpuContext* ctx)
 {
     uint32_t fb = 0;
     {
@@ -884,9 +823,9 @@ extern "C" void VIGetNextFrameBuffer_HLE_801bab24(CpuContext* ctx)
     ViSetR3(ctx, fb);
     VI_HLE_PollRetrace(ctx);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BAB24, VIGetNextFrameBuffer_HLE_801bab24, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80058240, VIGetNextFrameBuffer_HLE_80058240, (CpuContext* ctx), (ctx));
 
-extern "C" void VISetBlack_HLE_801bab2c(CpuContext* ctx)
+extern "C" void VISetBlack_HLE_80058250(CpuContext* ctx)
 {
     const bool makeBlack = ctx ? (ctx->gpr[3] != 0) : false;
     {
@@ -897,9 +836,9 @@ extern "C" void VISetBlack_HLE_801bab2c(CpuContext* ctx)
     }
     ViSetR3(ctx, 0);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BAB2C, VISetBlack_HLE_801bab2c, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(80058250, VISetBlack_HLE_80058250, (CpuContext* ctx), (ctx));
 
-extern "C" void VIGetRetraceCount_HLE_801baba4(CpuContext* ctx)
+extern "C" void VIGetRetraceCount_HLE_800582d0(CpuContext* ctx)
 {
     uint32_t count = 0;
     {
@@ -910,7 +849,7 @@ extern "C" void VIGetRetraceCount_HLE_801baba4(CpuContext* ctx)
     ViSetR3(ctx, count);
     VI_HLE_PollRetrace(ctx);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BABA4, VIGetRetraceCount_HLE_801baba4, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800582D0, VIGetRetraceCount_HLE_800582d0, (CpuContext* ctx), (ctx));
 
 extern "C" void VIGetNextField_HLE_801babac(CpuContext* ctx)
 {
@@ -923,9 +862,11 @@ extern "C" void VIGetNextField_HLE_801babac(CpuContext* ctx)
     ViSetR3(ctx, fieldOdd ? 1 : 0);
     VI_HLE_PollRetrace(ctx);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BABAC, VIGetNextField_HLE_801babac, (CpuContext* ctx), (ctx));
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE_VOID(801BABAC, VIGetNextField_HLE_801babac, (CpuContext* ctx), (ctx));
+#endif // RESORT-UNMAPPED
 
-extern "C" void VIGetCurrentLine_HLE_801bac48(CpuContext* ctx)
+extern "C" void VIGetCurrentLine_HLE_800582e0(CpuContext* ctx)
 {
     uint32_t height = 480;
     std::chrono::microseconds interval{16666us};
@@ -937,7 +878,7 @@ extern "C" void VIGetCurrentLine_HLE_801bac48(CpuContext* ctx)
         interval = g_vi.retraceInterval;
         last = g_vi.lastRetrace;
     }
-    const auto now = Clock::now();
+    const auto now = GuestClock::SchedulingNow();
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last);
     uint32_t line = 0;
     if (interval.count() > 0 && height > 0) {
@@ -946,14 +887,14 @@ extern "C" void VIGetCurrentLine_HLE_801bac48(CpuContext* ctx)
     }
     ViSetR3(ctx, line);
 }
-PPC_NATIVE_OVERRIDE_VOID(801BAC48, VIGetCurrentLine_HLE_801bac48, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800582E0, VIGetCurrentLine_HLE_800582e0, (CpuContext* ctx), (ctx));
 
-extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
+extern "C" void VIWaitForRetrace_HLE_800570f0(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     
     if (Fiber::GuestFiberManager::IsInitialized()) {
-        const int32_t irqState = OS__DisableInterrupts_801a65ac();
+        const int32_t irqState = OS__DisableInterrupts_8004af10();
         uint32_t retraceCount = 0;
         {
             std::lock_guard<std::mutex> lock(g_viMutex);
@@ -963,7 +904,7 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
 
         do {
             cpu->gpr[3] = kViRetraceQueueAddr;
-            OSSleepThread_HLE_801aa9b8(cpu);
+            OSSleepThread_HLE_8004ee20(cpu);
 
             {
                 std::lock_guard<std::mutex> lock(g_viMutex);
@@ -974,7 +915,7 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
             }
         } while (true);
 
-        OS__RestoreInterrupts_801a65d4(irqState);
+        OS__RestoreInterrupts_8004af50(irqState);
     } else {
         std::chrono::microseconds interval{16666us};
         Clock::time_point target;
@@ -985,7 +926,7 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
             target = g_vi.lastRetrace + interval;
         }
 
-        const auto now = Clock::now();
+        const auto now = GuestClock::SchedulingNow();
         if (now < target) {
             SleepPreciselyUntil(target, true);
         }
@@ -993,4 +934,4 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
     }
     ViSetR3(cpu, 0);
 }
-PPC_NATIVE_OVERRIDE_VOID(801B99EC, VIWaitForRetrace_HLE_801b99ec, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(800570F0, VIWaitForRetrace_HLE_800570f0, (CpuContext* ctx), (ctx));

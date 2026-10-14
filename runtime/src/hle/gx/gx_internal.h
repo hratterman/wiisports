@@ -54,24 +54,24 @@ bool is_offscreen() noexcept;
 }
 
 // --- Constants ---
-constexpr uint32_t kGXDataPtrAddr = 0x803886C8;
-constexpr uint32_t kDlFifoAddr = 0x80344090;
-constexpr uint32_t kDlWritePtrAddr = 0x803440A4;
-constexpr uint32_t kDlCountAddr = 0x803440AC;
+constexpr uint32_t kGXDataPtrAddr = 0x806F6D40;
+constexpr uint32_t kDlFifoAddr = 0x8070CDE0;
+constexpr uint32_t kDlWritePtrAddr = 0x8070CDF4;
+constexpr uint32_t kDlCountAddr = 0x8070CDFC;
 constexpr uint32_t kDlWrapFlagOffset = 0x20;
 constexpr uint32_t kMaxTluts = 20;
-constexpr uint32_t kGxDrawDoneFlagAddr = 0x803867d8;
+constexpr uint32_t kGxDrawDoneFlagAddr = 0x806f4658;
 
 // --- External Declarations ---
 extern "C" void GXInitTexObjTlut(GXTexObj* obj, u32 tlut);
-extern "C" int32_t OS__DisableInterrupts_801a65ac();
-extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
-extern "C" uint32_t __OSSetInterruptHandler_801a65f8_hle(uint32_t interrupt, uint32_t handler);
-extern "C" uint32_t __OSUnmaskInterrupts_801a69bc_hle(uint32_t mask);
-extern "C" uint32_t OS__GetCurrentThread_801a98b0_hle();
-extern "C" void GX__SetCPUFifo_8016c94c(uint32_t fifoAddr);
-extern "C" void GX__SetDirtyState_8016ee78();
-extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes);
+extern "C" int32_t OS__DisableInterrupts_8004af10();
+extern "C" int32_t OS__RestoreInterrupts_8004af50(int32_t level);
+extern "C" uint32_t __OSSetInterruptHandler_8004af80_hle(uint32_t interrupt, uint32_t handler);
+extern "C" uint32_t __OSUnmaskInterrupts_8004b360_hle(uint32_t mask);
+extern "C" uint32_t OS__GetCurrentThread_8004dcc0_hle();
+extern "C" void GX__SetCPUFifo_80032ea0(uint32_t fifoAddr);
+extern "C" void GX__SetDirtyState_80035550();
+extern "C" void GX__CallDisplayList_80039910(uint32_t listAddr, uint32_t nbytes);
 
 extern std::atomic_bool g_auroraFrameActive;
 extern std::atomic_bool g_auroraFrameHadWork;
@@ -108,6 +108,11 @@ struct HleTexObj {
     alignas(GXTexObj) std::byte storage[sizeof(GXTexObj)]{};
     bool storageLive = false;
     bool constructed = false;
+    // Resortcompiled: true once GXInitTexObj(CI) has given the host object its image. Objects created as a
+    // side effect of GXInitTexObjLOD/WrapMode/Filter on a GXTexObj the game copied out of a resource file
+    // (nw4r ScnMdl::CopiedMatAccess, used for WSR's Mii outfits) are constructed but imageless, and the load
+    // path must still decode them from guest memory.
+    bool imageBound = false;
 
     HleTexObj() = default;
     ~HleTexObj() { Destroy(); }
@@ -127,6 +132,7 @@ struct HleTexObj {
             std::memset(storage, 0, sizeof(storage));
             storageLive = false;
             constructed = false;
+            imageBound = false;
         }
     }
 };
@@ -291,7 +297,7 @@ extern GxDisplayListState g_dlRecordState;
 
 inline bool IsDisplayListActive() noexcept { return g_dlRecordState.active; }
 
-// Mirrors GX__BeginDisplayList_80172e00's guest-side initialization.
+// Mirrors GX__BeginDisplayList_800397a0's guest-side initialization.
 void BeginDisplayListRecording(uint32_t listAddr, uint32_t sizeBytes);
 // Flushes the shadow cursor/count back into guest memory and stops recording.
 void EndDisplayListRecording();
@@ -346,6 +352,9 @@ TlutObjMeta& GetTlutObjMeta(uint32_t addr);
 GXTexObj* GetHostTexObj(uint32_t addr);
 GXTexObj* TryGetHostTexObj(uint32_t addr);
 GXTexObj* CreateHostTexObj(uint32_t addr);
+// Resortcompiled: see HleTexObj::imageBound.
+bool HostTexObjHasImage(uint32_t addr);
+void MarkHostTexObjImageBound(uint32_t addr);
 void MarkHostTexObjConstructed(uint32_t addr);
 void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size);
 // Invalidates GPU-only GXCopyTex results when guest CPU writes are made visible

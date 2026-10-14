@@ -37,11 +37,11 @@ int HleGxState::GetExpectedCompCount(GXAttr attr, const VtxAttrFmt& fmt) {
 }
 
 static void ApplyAuroraVtxStateForRawBegin(GXVtxFmt fmt) {
-    // KNOWN DIVERGENCE: this is the only publish site with includeNbt=true, so it also
-    // publishes GX_VA_NBT after GX_VA_NRM, which makes aurora's SETVAT fall-through clobber the
-    // NRM VAT with the default. Raw-FIFO geometry renders correctly with it; do not "fix" without
-    // an in-race A/B run.
-    PublishAuroraVtxState(fmt, AuroraVtxPublishOptions{/*includeNbt=*/true,
+    // GX_VA_NBT is an alias of GX_VA_NRM, not an independent CP attribute.
+    // Publishing it after NRM overwrites the normal VAT with NBT's default
+    // format, which can turn a later normal draw into an invalid GX_RGBA8
+    // component-type decode in Aurora.
+    PublishAuroraVtxState(fmt, AuroraVtxPublishOptions{/*includeNbt=*/false,
                                                        /*fmtLoopFirst=*/0,
                                                        /*fmtLoopLast=*/25});
 }
@@ -480,7 +480,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             const uint32_t listSize = ReadBE32(data + 5);
             if (!consumeBytes(9, sink)) break;
             if (listAddr != 0 && listSize > 0) {
-                GX__CallDisplayList_80172f64(listAddr, listSize);
+                GX__CallDisplayList_80039910(listAddr, listSize);
             }
             continue;
         }
@@ -488,6 +488,13 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
         if (IsDrawOpcode(opcode)) {
             if (g_hleGxState.fifoByteCount < 3) break;
             const uint16_t vtxCount = ReadBE16(data + 1);
+            // Consume the entire empty primitive now, including when its
+            // header arrived across multiple MMIO writes or inside a burst.
+            // There are no vertices, so the next byte is another command.
+            if (vtxCount == 0) {
+                if (!consumeBytes(3, sink)) break;
+                continue;
+            }
             const GXVtxFmt vtxFmt = static_cast<GXVtxFmt>(cmd & GX_VAT_MASK_CMD);
             const GXPrimitive prim = OpcodeToGXPrimitive(cmd);
             uint32_t rawVertexSize = 0;

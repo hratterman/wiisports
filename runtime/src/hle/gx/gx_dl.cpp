@@ -58,7 +58,7 @@ static uint32_t CalcDLVertexSize(GXVtxFmt vtxfmt) {
 
 static void ApplyAuroraVtxDesc();
 static void ApplyAuroraVtxAttrFmtForDisplayList(GXVtxFmt fmt, bool mixed);
-static void SyncAppliedVtxStateFromHleReal();
+static void InvalidateAppliedVtxState();
 static void SubmitLytDrawPacket(const uint8_t* packet, uint32_t packetBytes);
 
 static inline uint8_t ScaleLytAlpha(uint8_t alpha, uint32_t modulate) {
@@ -200,7 +200,7 @@ static bool SubmitLytDrawDirect(float x0, float y0, float x1, float y1, int texC
     }
     GXMarkFrameWork();
 
-    SyncAppliedVtxStateFromHleReal();
+    InvalidateAppliedVtxState();
     return true;
 }
 
@@ -791,21 +791,18 @@ struct DlMayContainDrawVisitor {
 
     bool OnNop(uint8_t) { return true; }
     bool OnBpReg(const uint8_t*, uint32_t) { return true; }
-    // An array base/stride write means the list is setting up indexed geometry.
-    bool OnCpReg(const uint8_t*, uint8_t reg, uint32_t) { return !(reg >= 0xA0 && reg <= 0xBF); }
+    // CP writes must update the HLE mirror too, even in a register-only list.
+    bool OnCpReg(const uint8_t*, uint8_t, uint32_t) { return false; }
     bool OnXfReg(const uint8_t*, uint32_t) { return true; }
-    bool OnIndexedXf(const uint8_t*, uint8_t, uint32_t) { return true; }
+    // Indexed XF loads need guest array addresses translated before submission.
+    bool OnIndexedXf(const uint8_t*, uint8_t, uint32_t) { return false; }
     bool OnInvalidateVertexCache(uint8_t) { return true; }
     // Draw opcodes reach this too (kHandlesDraw is false): a draw opcode, or a
     // command byte this walker does not model, both mean "assume it draws".
     bool OnUnknownCommand(uint8_t) { return false; }
-    bool OnCallDisplayList(uint32_t addr, uint32_t size, int depth) {
-        if (addr == 0 || size == 0) return true;
-        const uint8_t* nested = static_cast<const uint8_t*>(GuestToHostPtr(addr, size));
-        if (!nested) return false;
-        DlMayContainDrawVisitor child;
-        return WalkDisplayList(nested, size, child, depth + 1);
-    }
+    // Aurora cannot follow guest addresses. Even a register-only child must
+    // go through scan/flatten so its matrices and CP state take effect.
+    bool OnCallDisplayList(uint32_t, uint32_t, int) { return false; }
 };
 
 static bool DisplayListMayContainDraw(const uint8_t* data, uint32_t nbytes) {
@@ -1041,7 +1038,7 @@ static std::vector<uint8_t>& FlattenDisplayListScratch() {
 static bool s_appliedVtxDescValid = false;
 static std::array<GXAttrType, 26> s_appliedVtxDesc{};
 static std::array<GXAttrType, 26> s_appliedSourceVtxDesc{};
-static bool s_appliedVtxAttrFmtValid = false;
+static std::array<bool, 8> s_appliedVtxAttrFmtValid{};
 static VtxAttrFmt s_appliedVtxAttrFmt[8][26]{};
 
 struct AppliedArrayState {
@@ -1053,43 +1050,21 @@ struct AppliedArrayState {
 
 static std::array<AppliedArrayState, GX_VA_MAX_ATTR> s_appliedArrays{};
 
-// True only while the applied-state mirror is a verbatim copy of HLE vertex state at
-// generation s_appliedVtxStateGeneration; any HLE-side mutation bumps that generation, so the
-// memoized republish below can never observe a stale match.
-static bool s_appliedVtxStateMatchesHle = false;
-static uint32_t s_appliedVtxStateGeneration = 0;
-
 static void InvalidateAppliedAuroraState() {
     s_appliedVtxDescValid = false;
-    s_appliedVtxAttrFmtValid = false;
-    s_appliedVtxStateMatchesHle = false;
+    s_appliedVtxAttrFmtValid.fill(false);
     for (auto& array : s_appliedArrays) {
         array.valid = false;
     }
 }
 
-static void SyncAppliedVtxStateFromHleReal() {
-    // skip the republish only when the mirror is already an exact copy of
-    // HLE state
-    if (s_appliedVtxStateMatchesHle && s_appliedVtxDescValid && s_appliedVtxAttrFmtValid &&
-        s_appliedVtxStateGeneration == g_hleGxState.vtxStateGeneration) {
-        return;
-    }
-    // Both mirrors are dense arrays of the same trivially copyable element types
-    // as their HLE counterparts, so publish them with three memcpys instead of
-    // 234 individual element assignments.
-    static_assert(sizeof(s_appliedVtxDesc) == sizeof(g_hleGxState.vtxDesc));
-    static_assert(sizeof(s_appliedSourceVtxDesc) == sizeof(g_hleGxState.vtxDesc));
-    static_assert(sizeof(s_appliedVtxAttrFmt) == sizeof(g_hleGxState.vtxAttrFmt));
-    std::memcpy(s_appliedVtxDesc.data(), g_hleGxState.vtxDesc, sizeof(g_hleGxState.vtxDesc));
-    std::memcpy(s_appliedSourceVtxDesc.data(), g_hleGxState.vtxDesc, sizeof(g_hleGxState.vtxDesc));
-    s_appliedVtxDescValid = true;
-
-    std::memcpy(s_appliedVtxAttrFmt, g_hleGxState.vtxAttrFmt, sizeof(g_hleGxState.vtxAttrFmt));
-    s_appliedVtxAttrFmtValid = true;
-
-    s_appliedVtxStateMatchesHle = true;
-    s_appliedVtxStateGeneration = g_hleGxState.vtxStateGeneration;
+static void InvalidateAppliedVtxState() {
+    // HLE state is the guest's desired state, not proof of the encoder's
+    // current state. Immediate draws expand indexed attributes to direct,
+    // and only the selected VAT row is published for a display-list draw.
+    // Reconcile on the next submission rather than certifying all eight rows.
+    s_appliedVtxDescValid = false;
+    s_appliedVtxAttrFmtValid.fill(false);
 }
 
 static void ApplyAuroraArrayIfChanged(GXAttr attr, const void* data, uint32_t size, uint8_t stride) {
@@ -1118,9 +1093,6 @@ static bool AuroraVtxDescMatchesLive(GXAttr attr, GXAttrType expected) {
 
 static void ApplyAuroraVtxDesc() {
     const bool hadValidState = s_appliedVtxDescValid;
-    if (!hadValidState) {
-        s_appliedVtxStateMatchesHle = false;
-    }
     for (int attr = 0; attr < 26; ++attr) {
         if (attr == GX_VA_NBT) continue;
         const GXAttr gxAttr = static_cast<GXAttr>(attr);
@@ -1155,13 +1127,7 @@ static uint32_t GetIndexedAttrElementSizeBytes(GXAttr attr, const VtxAttrFmt& fm
 }
 
 static void ApplyAuroraVtxAttrFmt(GXVtxFmt fmt) {
-    const bool hadValidState = s_appliedVtxAttrFmtValid;
-    // Rows other than `fmt` keep their contents and every write below copies
-    // g_hleGxState, so an already-matching mirror still matches. Only the rebuild
-    // from an invalidated mirror leaves the untouched rows divergent.
-    if (!hadValidState) {
-        s_appliedVtxStateMatchesHle = false;
-    }
+    const bool hadValidState = s_appliedVtxAttrFmtValid[fmt];
     for (int attr = 0; attr < 26; ++attr) {
         if (attr == GX_VA_NBT) continue;
         if (IsMatrixIndexAttr(static_cast<GXAttr>(attr))) continue;
@@ -1172,7 +1138,7 @@ static void ApplyAuroraVtxAttrFmt(GXVtxFmt fmt) {
         GXSetVtxAttrFmt(fmt, static_cast<GXAttr>(attr), f.cnt, f.type, f.frac);
         s_appliedVtxAttrFmt[fmt][attr] = f;
     }
-    s_appliedVtxAttrFmtValid = true;
+    s_appliedVtxAttrFmtValid[fmt] = true;
 }
 
 static void ApplyAuroraVtxAttrFmtAll() {
@@ -1200,7 +1166,7 @@ static void SubmitLytDrawPacket(const uint8_t* packet, uint32_t packetBytes) {
 
     GXCallDisplayList(packet, packetBytes);
     GXMarkFrameWork();
-    SyncAppliedVtxStateFromHleReal();
+    InvalidateAppliedVtxState();
 }
 
 static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX_ATTR>& maxIdx,
@@ -1289,7 +1255,7 @@ extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     GxGuestWrite::NotifyWrite(addr, size);
 }
 
-extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
+extern "C" void GX__CallDisplayList_80039910(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;
     try {
         const uint8_t* list = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, nbytes));
@@ -1313,11 +1279,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             EnsureAuroraFrameActive();
             GXMarkFrameWork();
             GXCallDisplayList(list, nbytes);
-            // The republish is required even for register-only lists (verified by
-            // experiment: dropping it corrupts in-race geometry decode). It is
-            // instead memoized inside SyncAppliedVtxStateFromHleReal, so a run of
-            // register-only lists between draws pays for at most one mirror copy.
-            SyncAppliedVtxStateFromHleReal();
+            // A raw register stream does not certify the cached vertex layout.
+            InvalidateAppliedVtxState();
             return;
         }
         std::array<uint32_t, GX_VA_MAX_ATTR> maxIdx{}; std::array<bool, GX_VA_MAX_ATTR> sawIdx{};
@@ -1446,7 +1409,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 GXMarkFrameWork();
                 GXCallDisplayList(auroraStream, auroraStreamBytes);
                 // No flip back to GX_DIRECT here
-                SyncAppliedVtxStateFromHleReal();
+                InvalidateAppliedVtxState();
                 return;
             }
 
@@ -1466,7 +1429,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 GXMarkFrameWork();
                 GXCallDisplayList(list, nbytes);
 
-                SyncAppliedVtxStateFromHleReal();
+                InvalidateAppliedVtxState();
                 return;
             }
 
@@ -1483,9 +1446,9 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     } catch (...) {}
 }
 
-PPC_NATIVE_OVERRIDE_VOID(80172F64, GX__CallDisplayList_80172f64, (uint32_t listAddr, uint32_t nbytes), (listAddr, nbytes));
+PPC_NATIVE_OVERRIDE_VOID(80039910, GX__CallDisplayList_80039910, (uint32_t listAddr, uint32_t nbytes), (listAddr, nbytes));
 
-extern "C" void nw4r__lyt__detail__DrawQuad_800847c0(CpuContext* ctx) {
+extern "C" void nw4r__lyt__detail__DrawQuad_801a2e60(CpuContext* ctx) {
     uint32_t colors[4];
     const uint32_t colorAddr = ctx->gpr[7];
     const uint32_t* colorPtr = nullptr;
@@ -1500,9 +1463,9 @@ extern "C" void nw4r__lyt__detail__DrawQuad_800847c0(CpuContext* ctx) {
     EmitLytDrawQuad(ctx->gpr[3], ctx->gpr[4], static_cast<int32_t>(ctx->gpr[5]), ctx->gpr[6], colorPtr);
 }
 
-REGISTER_NATIVE_FUNCTION(0x800847C0, nw4r__lyt__detail__DrawQuad_800847c0);
+REGISTER_NATIVE_FUNCTION(0x801A2E60, nw4r__lyt__detail__DrawQuad_801a2e60);
 
-extern "C" void nw4r__lyt__detail__DrawQuad_80084d20(CpuContext* ctx) {
+extern "C" void nw4r__lyt__detail__DrawQuad_801a33c0(CpuContext* ctx) {
     uint32_t colors[4];
     const uint32_t colorAddr = ctx->gpr[7];
     const uint32_t* colorPtr = nullptr;
@@ -1518,4 +1481,4 @@ extern "C" void nw4r__lyt__detail__DrawQuad_80084d20(CpuContext* ctx) {
     EmitLytDrawQuad(ctx->gpr[3], ctx->gpr[4], static_cast<int32_t>(ctx->gpr[5]), ctx->gpr[6], colorPtr);
 }
 
-REGISTER_NATIVE_FUNCTION(0x80084D20, nw4r__lyt__detail__DrawQuad_80084d20);
+REGISTER_NATIVE_FUNCTION(0x801A33C0, nw4r__lyt__detail__DrawQuad_801a33c0);

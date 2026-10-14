@@ -1336,10 +1336,6 @@ private:
     }
 
     bool EnsureMixWorker() {
-#if defined(__EMSCRIPTEN__)
-        // Single-threaded browser build: always mix inline on the guest thread.
-        return false;
-#endif
         if (m_mixThread.joinable()) {
             return true;
         }
@@ -1473,16 +1469,16 @@ void InitForAXOut(CpuContext* ctx) {
     Memory::Write32(g_axTaskPtr + 0x34u, kAxRequestCallback);
     if (ctx) {
         const uint32_t r13 = ctx->gpr[13];
-        Memory::Write32(g_axTaskPtr + 0x10u, Memory::Read16(r13 - 0x73fcu));
-        Memory::Write16(g_axTaskPtr + 0x24u, Memory::Read16(r13 - 0x7400u));
-        Memory::Write16(g_axTaskPtr + 0x26u, Memory::Read16(r13 - 0x73feu));
+        Memory::Write32(g_axTaskPtr + 0x10u, Memory::Read16(r13 - 0x7cacu));
+        Memory::Write16(g_axTaskPtr + 0x24u, Memory::Read16(r13 - 0x7cb0u));
+        Memory::Write16(g_axTaskPtr + 0x26u, Memory::Read16(r13 - 0x7caeu));
     }
     Instance().ConfigureFromTask(g_axTaskPtr);
     LinkSingleDspTask(g_axTaskPtr);
     if (ctx) {
         const uint32_t r13 = ctx->gpr[13];
-        Memory::Write32(r13 - 0x66d8u, 1);
-        Memory::Write32(r13 - 0x66dcu, 0);
+        Memory::Write32(r13 - 0x3da8u, 1);
+        Memory::Write32(r13 - 0x3dacu, 0);
     }
 }
 

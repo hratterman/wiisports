@@ -14,10 +14,6 @@
 #include <SDL3/SDL_gamepad.h>
 #include <dolphin/pad.h>
 
-#if defined(__EMSCRIPTEN__)
-#include "web_input.h"
-#endif
-
 namespace {
 
 std::atomic<bool> g_rumbleEnabled{true};
@@ -102,7 +98,9 @@ extern "C" uint32_t PAD__Init_HLE()
 {
     return PADInit() ? 1u : 0u;
 }
-PPC_NATIVE_OVERRIDE(801AF2F0, PAD__Init_HLE, uint32_t, (), ());
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE(801AF2F0, PAD__Init_HLE, uint32_t, (), ());
+#endif // RESORT-UNMAPPED
 
 // PADRead: gathers every GameCube pad source for the frame and writes the statuses to guest memory.
 extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
@@ -122,14 +120,6 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
-#if defined(__EMSCRIPTEN__)
-    // [web] Phone / tablet on-screen controls join player 1 (not while the settings bar is open).
-    if (!InputBindings::InputBlocked()) {
-        WebInput::ApplyTouch(statuses, PAD_CHANMAX);
-    }
-    // [web] The page's input debug view shows exactly these statuses.
-    WebInput::PublishPadStatus(statuses, PAD_CHANMAX, rumbleMask);
-#endif
 
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
@@ -142,28 +132,33 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     return rumbleMask;
 }
-PPC_NATIVE_OVERRIDE(801AF44C, PAD__Read_HLE, uint32_t, (uint32_t statusPtr), (statusPtr));
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE(801AF44C, PAD__Read_HLE, uint32_t, (uint32_t statusPtr), (statusPtr));
+#endif // RESORT-UNMAPPED
 
 extern "C" uint32_t PAD__Reset_HLE(uint32_t mask)
 {
     return PADReset(mask) ? 1u : 0u;
 }
-PPC_NATIVE_OVERRIDE(801AF0DC, PAD__Reset_HLE, uint32_t, (uint32_t mask), (mask));
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE(801AF0DC, PAD__Reset_HLE, uint32_t, (uint32_t mask), (mask));
+#endif // RESORT-UNMAPPED
 
 extern "C" uint32_t PAD__Recalibrate_HLE(uint32_t mask)
 {
     return PADRecalibrate(mask) ? 1u : 0u;
 }
-PPC_NATIVE_OVERRIDE(801AF1E4, PAD__Recalibrate_HLE, uint32_t, (uint32_t mask), (mask));
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE(801AF1E4, PAD__Recalibrate_HLE, uint32_t, (uint32_t mask), (mask));
+#endif // RESORT-UNMAPPED
 
 extern "C" void PAD__ControlMotor_HLE(int32_t chan, uint32_t command)
 {
     if (command == PAD_MOTOR_RUMBLE && !g_rumbleEnabled.load(std::memory_order_relaxed)) {
         command = PAD_MOTOR_STOP;
     }
-#if defined(__EMSCRIPTEN__)
-    WebInput::NoteMotor(static_cast<uint32_t>(chan), command);
-#endif
     PADControlMotor(chan, command);
 }
-PPC_NATIVE_OVERRIDE_VOID(801AF908, PAD__ControlMotor_HLE, (int32_t chan, uint32_t command), (chan, command));
+#if 0 // RESORT-UNMAPPED: MKW address with no WSR match
+RESORT_UNMAPPED_OVERRIDE_VOID(801AF908, PAD__ControlMotor_HLE, (int32_t chan, uint32_t command), (chan, command));
+#endif // RESORT-UNMAPPED

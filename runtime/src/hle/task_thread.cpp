@@ -130,10 +130,10 @@ void ClearTaskJob(uint32_t taskThread, uint32_t job)
 
 } // namespace
 
-// HLE override for TaskThread_run (0x80242D7C).
+// HLE override for TaskThread_run (0x801C2BE4).
 // This mirrors the worker loop from the original implementation so job slots
 // are retired exactly when the callback has finished.
-extern "C" void TaskThread_run_HLE_80242d7c(CpuContext* ctx) {
+extern "C" void TaskThread_run_HLE_801c2be4(CpuContext* ctx) {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     const uint32_t taskThread = cpu->gpr[3];
     if (!Memory::Contains(taskThread + kTaskMessageQueueOffset, 0x4Cu)) {
@@ -162,7 +162,7 @@ extern "C" void TaskThread_run_HLE_80242d7c(CpuContext* ctx) {
             cpu->gpr[3] = taskThread + kTaskMessageQueueOffset;
             cpu->gpr[4] = outMsgPtr;
             cpu->gpr[5] = 1; // OS_MESSAGE_BLOCK
-            InvokeIndirectCpu(0x801A7424u, cpu); // OSReceiveMessage
+            InvokeIndirectCpu(0x8004B830u, cpu); // OSReceiveMessage
         }
 
         const uint32_t job = Memory::Read32(outMsgPtr);
@@ -198,7 +198,7 @@ extern "C" void TaskThread_run_HLE_80242d7c(CpuContext* ctx) {
                     cpu->gpr[3] = doneQueue;
                     cpu->gpr[4] = token;
                     cpu->gpr[5] = 0; // OS_MESSAGE_NOBLOCK
-                    InvokeIndirectCpu(0x801A735Cu, cpu); // OSSendMessage
+                    InvokeIndirectCpu(0x8004B760u, cpu); // OSSendMessage
                 }
             }
         }
@@ -206,4 +206,6 @@ extern "C" void TaskThread_run_HLE_80242d7c(CpuContext* ctx) {
         ClearTaskJob(taskThread, job);
     }
 }
-PPC_NATIVE_OVERRIDE_VOID(80242D7C, TaskThread_run_HLE_80242d7c, (CpuContext* ctx), (ctx));
+// Resortcompiled: MKW movie-manager/THP specific (hard-coded MKW heap/REL addresses); WSR runs the
+// translated EGG::TaskThread::Run instead.
+// PPC_NATIVE_OVERRIDE_VOID(801C2BE4, TaskThread_run_HLE_801c2be4, (CpuContext* ctx), (ctx));

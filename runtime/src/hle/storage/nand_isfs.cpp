@@ -7,7 +7,7 @@
 #include "discord_presence.h"
 #include "runtime_log.h"
 
-extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx);
+extern "C" void OSSleepThread_HLE_8004ee20(CpuContext* ctx);
 
 // ============================================================================
 // SHA device handles
@@ -409,7 +409,8 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     const char* fopenMode = "rb";
     if (mode == 2 || mode == 3) {
         if (!PathExists(hostPath)) {
-            LogNandNotFound("IOS_Open", hostPath, "write open, IOS never creates on open");
+            LogNandWarning("IOS_Open", "'%s' does not exist; open mode %u never creates it",
+                    HostPathText(hostPath).c_str(), mode);
             return ISFS_ENOENT;
         }
         fopenMode = "r+b";      // Write-only opens still need read for seeks
@@ -418,25 +419,21 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     FILE* file = NandFopen(hostPath, fopenMode);
 
     if (!file) {
-        if (!PathExists(hostPath)) {
-            LogNandNotFound("IOS_Open", hostPath, "read open, the game handles ENOENT");
-        } else {
-            LogNandError("IOS_Open", "FAILED to open '%s'", HostPathText(hostPath).c_str());
-        }
+        LogNandError("IOS_Open", "FAILED to open '%s'", HostPathText(hostPath).c_str());
         return ISFS_ENOENT;
     }
     
     int32_t fd = AllocateFd(hostPath, file, mode);
     return fd;
 }
-PPC_NATIVE_OVERRIDE(801938F8, NAND_IOS_Open_HLE, int32_t, (uint32_t pathPtr, uint32_t mode), (pathPtr, mode));
+PPC_NATIVE_OVERRIDE(8003B1F0, NAND_IOS_Open_HLE, int32_t, (uint32_t pathPtr, uint32_t mode), (pathPtr, mode));
 
-extern "C" void NAND_IOS_OpenBody_HLE_801938FC(CpuContext* ctx) {
+extern "C" void NAND_IOS_OpenBody_HLE_8003B1F4(CpuContext* ctx) {
     const int32_t result = NAND_IOS_Open_HLE(ctx->gpr[3], ctx->gpr[4]);
     ctx->gpr[3] = static_cast<uint32_t>(result);
     ctx->gpr[1] = ctx->gpr[1] + 32u;
 }
-REGISTER_NATIVE_FUNCTION_AS(0x801938FC, NAND_IOS_OpenBody_HLE_801938FC, "NAND_IOS_OpenBody_HLE_801938FC");
+REGISTER_NATIVE_FUNCTION_AS(0x8003B1F4, NAND_IOS_OpenBody_HLE_8003B1F4, "NAND_IOS_OpenBody_HLE_8003B1F4");
 
 extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
     if (fd == ISFS_DEV_FD) {
@@ -465,7 +462,7 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
     CloseFd(fd);
     return ISFS_OK;
 }
-PPC_NATIVE_OVERRIDE(80193AD8, NAND_IOS_Close_HLE, int32_t, (uint32_t fd), (fd));
+PPC_NATIVE_OVERRIDE(8003B3E0, NAND_IOS_Close_HLE, int32_t, (uint32_t fd), (fd));
 
 extern "C" int32_t NAND_IOS_Read_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t length) {
     auto* handle = GetHandle(fd);
@@ -489,7 +486,7 @@ extern "C" int32_t NAND_IOS_Read_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t l
     
     return static_cast<int32_t>(bytesRead);
 }
-PPC_NATIVE_OVERRIDE(80193C80, NAND_IOS_Read_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
+PPC_NATIVE_OVERRIDE(8003B590, NAND_IOS_Read_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
 
 extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t length) {
     auto* handle = GetHandle(fd);
@@ -514,7 +511,7 @@ extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t 
     
     return static_cast<int32_t>(bytesWritten);
 }
-PPC_NATIVE_OVERRIDE(80193E88, NAND_IOS_Write_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
+PPC_NATIVE_OVERRIDE(8003B7A0, NAND_IOS_Write_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
 
 extern "C" int32_t NAND_IOS_Seek_HLE(uint32_t fd, int32_t offset, int32_t whence) {
     auto* handle = GetHandle(fd);
@@ -531,7 +528,7 @@ extern "C" int32_t NAND_IOS_Seek_HLE(uint32_t fd, int32_t offset, int32_t whence
     handle->position = static_cast<uint32_t>(std::ftell(handle->file));
     return static_cast<int32_t>(handle->position);
 }
-PPC_NATIVE_OVERRIDE(80194070, NAND_IOS_Seek_HLE, int32_t, (uint32_t fd, int32_t offset, int32_t whence), (fd, offset, whence));
+PPC_NATIVE_OVERRIDE(8003B990, NAND_IOS_Seek_HLE, int32_t, (uint32_t fd, int32_t offset, int32_t whence), (fd, offset, whence));
 
 // ============================================================================
 // IOS_Ioctl HLE - Handles filesystem commands
@@ -789,7 +786,7 @@ static bool TryDeferredNetworkIosSync(CpuContext* ctx, StartSync&& startSync) {
     if (deferred.disposition == NetworkDeferredContract::StartDisposition::Started) {
         ctx->gpr[1] = frame.newStack;
         ctx->gpr[3] = frame.waitQueue;
-        OSSleepThread_HLE_801aa9b8(ctx);
+        OSSleepThread_HLE_8004ee20(ctx);
         FinishDeferredIosWait(ctx, frame.oldStack, deferred.token);
         return true;
     }
@@ -820,7 +817,7 @@ extern "C" void NAND_IOS_Ioctl_Entry_HLE(CpuContext* ctx) {
     ctx->gpr[3] = static_cast<uint32_t>(
         NAND_IOS_Ioctl_HLE(fd, cmd, inBufPtr, inLen, outBufPtr, outLen));
 }
-PPC_NATIVE_OVERRIDE_VOID(80194290, NAND_IOS_Ioctl_Entry_HLE, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(8003BBC0, NAND_IOS_Ioctl_Entry_HLE, (CpuContext* ctx), (ctx));
 
 // ============================================================================
 // ISFS_OpenLib - Initialize ISFS
@@ -834,15 +831,15 @@ static bool g_isfsInitialized = false;
 // load-bearing and must not be "tidied". Names come from the RVL IPC/ISFS
 // sources; only the naming changed here, never a value.
 namespace {
-constexpr uint32_t kIsfsFdSda1Offset = 29408u;              // __ISFS_fd
-constexpr uint32_t kIsfsPathSda1Offset = 29400u;            // __ISFS_path ("/dev/fs")
-constexpr uint32_t kIpcBufferLoSda1Offset = 25620u;         // IPC buffer window, low
-constexpr uint32_t kIpcBufferHiSda1Offset = 25616u;         // IPC buffer window, high
-constexpr uint32_t kIpcArenaLoSda1Offset = 25732u;          // __IPCArenaLo
-constexpr uint32_t kIpcArenaHiSda1Offset = 25728u;          // __IPCArenaHi
-constexpr uint32_t kIsfsHeapHandleSda1Offset = 25724u;      // ISFS heap handle
-constexpr uint32_t kIsfsHeapBaseSda1Offset = 25740u;        // ISFS heap base address
-constexpr uint32_t kIsfsHeapInitializedSda1Offset = 25744u; // ISFS heap created flag
+constexpr uint32_t kIsfsFdSda1Offset = 32688u;              // __ISFS_fd
+constexpr uint32_t kIsfsPathSda1Offset = 32680u;            // __ISFS_path ("/dev/fs")
+constexpr uint32_t kIpcBufferLoSda1Offset = 16724u;         // IPC buffer window, low
+constexpr uint32_t kIpcBufferHiSda1Offset = 16720u;         // IPC buffer window, high
+constexpr uint32_t kIpcArenaLoSda1Offset = 16836u;          // __IPCArenaLo
+constexpr uint32_t kIpcArenaHiSda1Offset = 16832u;          // __IPCArenaHi
+constexpr uint32_t kIsfsHeapHandleSda1Offset = 16828u;      // ISFS heap handle
+constexpr uint32_t kIsfsHeapBaseSda1Offset = 16844u;        // ISFS heap base address
+constexpr uint32_t kIsfsHeapInitializedSda1Offset = 16848u; // ISFS heap created flag
 } // namespace
 
 static void WriteGuestString(uint32_t address, const char* value) {
@@ -925,13 +922,13 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
 
             ctx->gpr[3] = heapBase;
             ctx->gpr[4] = heapSize;
-            ctx->lr = 0x80169BCCu;
-            InvokeDirectCpu<0x801949B8u>(ctx);
+            ctx->lr = 0x80030060u;
+            InvokeDirectCpu<0x8003C300u>(ctx);
             const uint32_t heapHandle = ctx->gpr[3];
 
             ctx->gpr[3] = heapBase + heapSize;
-            ctx->lr = 0x80169BCCu;
-            InvokeDirectCpu<0x80193040u>(ctx);
+            ctx->lr = 0x80030060u;
+            InvokeDirectCpu<0x8003A900u>(ctx);
 
             ctx->gpr[3] = savedR3;
             ctx->gpr[4] = savedR4;
@@ -946,11 +943,11 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     return ISFS_OK;
 }
 
-extern "C" void ISFS_OpenLib_HLE_80169BCC(CpuContext* ctx) {
+extern "C" void ISFS_OpenLib_HLE_80030060(CpuContext* ctx) {
     ctx->gpr[3] = static_cast<uint32_t>(ISFS_OpenLib_Initialize(ctx));
 }
 
-REGISTER_NATIVE_FUNCTION_AS(0x80169BCC, ISFS_OpenLib_HLE_80169BCC, "ISFS_OpenLib_HLE_80169BCC");
+REGISTER_NATIVE_FUNCTION_AS(0x80030060, ISFS_OpenLib_HLE_80030060, "ISFS_OpenLib_HLE_80030060");
 
 // ============================================================================
 // IOS_Ioctlv HLE - Vector Ioctl for complex ISFS operations
@@ -1149,4 +1146,4 @@ extern "C" void NAND_IOS_Ioctlv_Entry_HLE(CpuContext* ctx) {
     ctx->gpr[3] = static_cast<uint32_t>(
         NAND_IOS_Ioctlv_HLE(fd, cmd, numIn, numOut, vectorPtr));
 }
-PPC_NATIVE_OVERRIDE_VOID(801945E0, NAND_IOS_Ioctlv_Entry_HLE, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(8003BF20, NAND_IOS_Ioctlv_Entry_HLE, (CpuContext* ctx), (ctx));

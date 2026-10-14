@@ -570,6 +570,18 @@ GXTexObj* CreateHostTexObj(uint32_t addr) {
     return slot.host->PublicPtr();
 }
 
+bool HostTexObjHasImage(uint32_t addr) {
+    TexObjSlot* slot = FindTexObjSlot(addr);
+    return slot != nullptr && slot->host && slot->host->constructed && slot->host->imageBound;
+}
+
+void MarkHostTexObjImageBound(uint32_t addr) {
+    TexObjSlot* slot = FindTexObjSlot(addr);
+    if (slot != nullptr && slot->host) {
+        slot->host->imageBound = true;
+    }
+}
+
 void MarkHostTexObjConstructed(uint32_t addr) {
     TexObjSlot* slot = FindTexObjSlot(addr);
     if (slot != nullptr && slot->host) {

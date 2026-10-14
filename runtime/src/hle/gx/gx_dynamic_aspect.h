@@ -5,8 +5,8 @@
 #include <cmath>
 #include <cstdint>
 
-// EGG::Screen picks a canvas record at 0x802A3EE8 via SCGetAspectRatio, squeezed into the fixed
-// 608x456 framebuffer by xScale=fbWidth/width; only gScreenScaleX/Y (0x80386F20/24) feed vertical
+// EGG::Screen picks a canvas record at 0x806B5178 via SCGetAspectRatio, squeezed into the fixed
+// 608x456 framebuffer by xScale=fbWidth/width; only gScreenScaleX/Y (0x806F4FE8/24) feed vertical
 // FOV, so records can only widen horizontal FOV. Solving for k = surfaceAspect/(16:9): record
 // width = base*max(k,1), gScreenScaleY = max(1/k,1), giving Hor+ above 16:9 and Vert+ below it
 // without cropping either axis. Verified bit-exact against the reference Gecko patch at 2560x1080.

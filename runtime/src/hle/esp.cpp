@@ -12,7 +12,7 @@
 #include <cctype>
 
 static constexpr uint32_t MKW_TITLE_ID_HI = 0x00010004;
-static constexpr uint32_t MKW_TITLE_ID_LO = 0x524D4350; // "RMCP" fallback
+static constexpr uint32_t MKW_TITLE_ID_LO = 0x525A5450; // "RMCP" fallback
 
 static bool IsValidEspTitleCode(uint32_t code) {
     for (int shift = 24; shift >= 0; shift -= 8) {
@@ -48,23 +48,23 @@ static void ReportEspArgError(bool& logged, const char* who, const char* what)
     std::fflush(stderr);
 }
 
-// 0x801671d0 -> ESP_InitLib
+// 0x800a4c90 -> ESP_InitLib
 // Opens /dev/es. We just pretend it succeeded.
 extern "C" int32_t ESP_InitLib_stub(void)
 {
     return 0;
 }
-PPC_NATIVE_OVERRIDE(801671d0, ESP_InitLib_stub, int32_t, (void), ());
+PPC_NATIVE_OVERRIDE(800a4c90, ESP_InitLib_stub, int32_t, (void), ());
 
-// 0x80167224 -> ESP_CloseLib  
+// 0x800A4CF0 -> ESP_CloseLib  
 // Closes /dev/es. No-op for us.
 extern "C" int32_t ESP_CloseLib_stub(void)
 {
     return 0;
 }
-PPC_NATIVE_OVERRIDE(80167224, ESP_CloseLib_stub, int32_t, (void), ());
+PPC_NATIVE_OVERRIDE(800A4CF0, ESP_CloseLib_stub, int32_t, (void), ());
 
-// 0x8016799c -> ESP_GetTitleId
+// 0x800a5250 -> ESP_GetTitleId
 // Gets the 64-bit title ID. param_1 is pointer to 8 bytes.
 // Decompiled signature: int ESP_GetTitleId(undefined4 *param_1)
 extern "C" int32_t ESP_GetTitleId_stub(uint32_t outPtr)
@@ -80,9 +80,9 @@ extern "C" int32_t ESP_GetTitleId_stub(uint32_t outPtr)
     Memory::Write32(outPtr + 4, CurrentTitleIdLo());
     return 0;
 }
-PPC_NATIVE_OVERRIDE(8016799c, ESP_GetTitleId_stub, int32_t, (uint32_t outPtr), (outPtr));
+PPC_NATIVE_OVERRIDE(800a5250, ESP_GetTitleId_stub, int32_t, (uint32_t outPtr), (outPtr));
 
-// 0x80167904 -> ESP_GetDataDir(titleHi, titleLo, outPathPtr)
+// 0x800A51B0 -> ESP_GetDataDir(titleHi, titleLo, outPathPtr)
 // Gets the NAND data directory path for a title.
 extern "C" int32_t ESP_GetDataDir_stub(uint32_t titleHi, uint32_t titleLo, uint32_t outPathPtr)
 {
@@ -115,4 +115,4 @@ extern "C" int32_t ESP_GetDataDir_stub(uint32_t titleHi, uint32_t titleLo, uint3
     Memory::Write8(dst, 0); // null terminator
     return 0;
 }
-PPC_NATIVE_OVERRIDE(80167904, ESP_GetDataDir_stub, int32_t, (uint32_t titleHi, uint32_t titleLo, uint32_t outPathPtr), (titleHi, titleLo, outPathPtr));
+PPC_NATIVE_OVERRIDE(800A51B0, ESP_GetDataDir_stub, int32_t, (uint32_t titleHi, uint32_t titleLo, uint32_t outPathPtr), (titleHi, titleLo, outPathPtr));

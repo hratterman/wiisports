@@ -1,6 +1,7 @@
 #include "settings_overlay.h"
 #include "audio_backend.h"
 #include "aurora_events.h"
+#include "resort_wiimote.h"
 #include "controller_button_names.h"
 #include "controller_mapping_wizard.h"
 #include "input_bindings.h"
@@ -12,9 +13,11 @@
 
 #include <imgui.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_mouse.h>
+#include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_timer.h>
 
@@ -35,7 +38,7 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
+#include <windows.h>
 #include <shellapi.h>
 #endif
 
@@ -75,6 +78,9 @@ const char* GraphicsApiDisplayName() {
 bool g_topBarVisible = false;
 bool g_exitPromptOpen = false;
 bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
+bool g_dualSenseLedSupported = false;
+bool g_dualSenseLedRequestOk = false;
+std::string g_dualSenseLedError;
 int g_controllerPort = 0;
 float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
 int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
@@ -111,9 +117,6 @@ bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
 bool g_forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
-#if defined(__APPLE__)
-bool g_metalFxSpatialUpscaling = RuntimeConfigFile::MetalFxSpatialUpscaling(false);
-#endif
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
@@ -607,17 +610,7 @@ bool DrawKeyboardSettings(uint32_t port) {
         });
     }
     if (!enabled) return false;
-    ImGui::TextDisabled(PADGetKeyboardMergesController()
-                            ? "Works together with the gamepad on this port. F10 opens settings."
-                            : "Replaces the gamepad on this port. F10 opens settings.");
-    if (PADHasDefaultKeyBindings(port)) {
-        // [web] Port 1 starts with the browser's default layout (web_input_layout.h).
-        if (ImGui::Button("Restore default keys")) {
-            PADRestoreDefaultKeyBindings(port);
-            PADSerializeMappings();
-        }
-        ImGui::SameLine();
-    }
+    ImGui::TextDisabled("Replaces the gamepad on this port. F10 opens settings.");
     if (ImGui::Button("Use WASD + mouse preset") || usePreset) {
         const std::array<int, PAD_BUTTON_COUNT> keys = {
             PAD_KEY_MOUSE_LEFT, SDL_SCANCODE_SPACE, SDL_SCANCODE_E, SDL_SCANCODE_Q,
@@ -756,7 +749,7 @@ void DrawRumbleSettings() {
     }
 }
 
-void DrawControllerSettings() {
+void DrawLegacyGameCubeSettings() {
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
         const std::string label = "Port " + std::to_string(port + 1);
         ImGui::RadioButton(label.c_str(), &g_controllerPort, port);
@@ -767,8 +760,7 @@ void DrawControllerSettings() {
 
     ImGui::Separator();
     const uint32_t selectedGamePort = static_cast<uint32_t>(g_controllerPort);
-    // A keyboard replaces the gamepad unless the two are merged (the web build merges them).
-    if (DrawKeyboardSettings(selectedGamePort) && !PADGetKeyboardMergesController()) {
+    if (DrawKeyboardSettings(selectedGamePort)) {
         return;
     }
     ImGui::Separator();
@@ -780,7 +772,6 @@ void DrawControllerSettings() {
     }
     ImGui::Separator();
     controller_mapping_wizard::DrawSetupList();
-    DrawWiiRemoteSettings(selectedGamePort);
     const uint32_t controllerCount = PADCount();
     if (controllerCount == 0) {
         ImGui::TextDisabled("No controller connected");
@@ -959,6 +950,57 @@ void DrawControllerSettings() {
     DrawRumbleSettings();
 }
 
+void DrawControllerSettings() {
+    ImGui::Text("Player 1 Wii Remote: %s", ResortWiimote::ActiveInputName());
+    ImGui::TextDisabled("Input changes automatically when a DualSense connects or disconnects.");
+
+    ImGui::SeparatorText("Keyboard and mouse");
+    ImGui::TextUnformatted("Pointer: mouse    A: left click or Z    B: right click or X");
+    ImGui::TextUnformatted("1 / 2: number keys    +: Enter    -: Backspace    Home: H");
+    ImGui::TextUnformatted("D-pad: arrows or WASD    Shake: Space    Recenter: R");
+    ImGui::TextUnformatted("MotionPlus tilt: hold Left Shift or middle click and move mouse");
+    ImGui::TextUnformatted("Roll: mouse wheel");
+
+    ImGui::SeparatorText("DualSense (SDL)");
+    ImGui::TextUnformatted("Pointer and MotionPlus: gyroscope    Recenter: R3    Shake: L1");
+    ImGui::TextUnformatted("A: Cross    B: Circle or R2    1: Square    2: Triangle");
+    ImGui::TextUnformatted("+: Options    -: Create    Home: PS button    D-pad: D-pad");
+    const int32_t index = PADGetIndexForPort(0);
+    SDL_Gamepad* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
+    if (pad && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5) {
+        ImGui::Text("Player 1: %s", SDL_GetGamepadName(pad));
+        ImGui::Text("Gyroscope: %s", SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) ? "available" : "unavailable");
+        ImGui::Text("Accelerometer: %s", SDL_GamepadSensorEnabled(pad, SDL_SENSOR_ACCEL) ? "active" : "waiting");
+        ImGui::Text("RGB LED: %s", g_dualSenseLedSupported ?
+                    (g_dualSenseLedRequestOk ? "SDL accepted aqua blue" : "request failed") : "unsupported by SDL");
+        if (!g_dualSenseLedError.empty()) ImGui::TextDisabled("SDL: %s", g_dualSenseLedError.c_str());
+    } else {
+        ImGui::TextDisabled("Connect a DualSense with gyro for motion controls.");
+    }
+    if (!ResortWiimote::DualSenseActive() && !WiiRemoteInput::IsRemoteChannel(0)) {
+        for (uint32_t candidate = 0; candidate < PADCount(); ++candidate) {
+            SDL_Gamepad* available = PADGetSDLGamepadForIndex(candidate);
+            if (!available || SDL_GetGamepadType(available) != SDL_GAMEPAD_TYPE_PS5 ||
+                !SDL_GamepadHasSensor(available, SDL_SENSOR_GYRO)) continue;
+            ImGui::PushID(static_cast<int>(candidate));
+            if (ImGui::Button("Use DualSense for player 1")) {
+                PADSetPortForIndex(candidate, 0);
+                g_configuredControllerIndices.fill(std::numeric_limits<int32_t>::min());
+            }
+            ImGui::PopID();
+            break;
+        }
+    }
+
+    ImGui::SeparatorText("Wii Remote over Bluetooth");
+    DrawWiiRemoteSettings(0);
+    ImGui::Separator();
+    if (ImGui::BeginMenu("GameCube / other controller settings")) {
+        DrawLegacyGameCubeSettings();
+        ImGui::EndMenu();
+    }
+}
+
 void DrawAudioSettings() {
     ImGui::SetNextItemWidth(220.0f);
     if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
@@ -1012,24 +1054,13 @@ void DrawAudioSettings() {
         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
         RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(g_attenuateMusicWhenMediaPlays);
     }
-#if defined(__APPLE__)
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Detects other apps with active audio output on macOS 14.2 or later. "
-            "Apps that keep an output stream running silently may keep game music muted.");
-    }
-#endif
     if (g_attenuateMusicWhenMediaPlays) {
         if (MusicAttenuation::IsExternalMediaPlaying()) {
             ImGui::TextDisabled("External media is playing; game music is muted.");
         } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
-            ImGui::TextDisabled("Checking external audio...");
+            ImGui::TextDisabled("Waiting for media controls...");
         } else if (!MusicAttenuation::IsMediaControlAvailable()) {
-#if defined(__APPLE__)
-            ImGui::TextDisabled("External audio detection unavailable (requires macOS 14.2 or later).");
-#else
             ImGui::TextDisabled("Media controls are unavailable.");
-#endif
         } else {
             ImGui::TextDisabled("No external media is currently playing.");
         }
@@ -1118,36 +1149,6 @@ void DrawGraphicsSettings() {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
     ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
     ImGui::PopTextWrapPos();
-#if defined(__APPLE__)
-    const bool metalFxSupported = aurora_is_metalfx_spatial_supported();
-    ImGui::BeginDisabled(!metalFxSupported);
-    if (ImGui::Checkbox("MetalFX spatial upscaling", &g_metalFxSpatialUpscaling)) {
-        aurora_set_metalfx_spatial(g_metalFxSpatialUpscaling);
-        RuntimeConfigFile::SetMetalFxSpatialUpscaling(g_metalFxSpatialUpscaling);
-    }
-    ImGui::EndDisabled();
-    switch (aurora_get_metalfx_status()) {
-    case AURORA_METALFX_ACTIVE:
-        ImGui::TextDisabled("Active: upscaling the game image before the overlay.");
-        break;
-    case AURORA_METALFX_NOT_UPSCALING:
-        ImGui::TextDisabled("Choose a lower internal resolution to use MetalFX.");
-        break;
-    case AURORA_METALFX_UNSUPPORTED:
-        ImGui::TextDisabled("Requires macOS 13+, Metal, and a MetalFX-capable GPU.");
-        break;
-    case AURORA_METALFX_ERROR:
-        ImGui::TextDisabled("Unavailable after a renderer error; toggle off and on to retry.");
-        break;
-    case AURORA_METALFX_DISABLED:
-        if (metalFxSupported) {
-            ImGui::TextDisabled("Render below output resolution for sharper lower-cost output.");
-        } else {
-            ImGui::TextDisabled("MetalFX spatial upscaling is unavailable on this device.");
-        }
-        break;
-    }
-#endif
     if (ImGui::Checkbox("Disable copy filter", &g_disableCopyFilter)) {
         aurora_set_disable_copy_filter(g_disableCopyFilter);
         RuntimeConfigFile::SetDisableCopyFilter(g_disableCopyFilter);
@@ -1403,8 +1404,10 @@ bool IsMouseActivity(const SDL_Event& event) {
 // Runs on the thread that pumps SDL events (the same one that calls Draw), so
 // the SDL cursor calls are safe here.
 void UpdateCursorAutoHide() {
+    // Resortcompiled: while the mouse is the Wii Remote pointer the OS cursor stays hidden over the game.
     const bool shouldHide =
-        !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
+        (!g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay) ||
+        ResortWiimote::CursorShouldHide();
     if (shouldHide == g_cursorHidden) {
         return;
     }
@@ -1452,9 +1455,6 @@ void InitializeRuntimeSettings() noexcept {
     MusicAttenuation::SetVoicesVolume(static_cast<float>(g_voicesVolumePercent) / 100.0f);
     MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
     RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
-#if defined(__APPLE__)
-    aurora_set_metalfx_spatial(g_metalFxSpatialUpscaling);
-#endif
     const uint32_t targetFps = kFrameInterpolationTargetFps[static_cast<size_t>(g_frameInterpolationMode)];
     LimitResolutionForFrameRate();
     aurora_set_frame_interpolation_fps(targetFps);
@@ -1462,8 +1462,12 @@ void InitializeRuntimeSettings() noexcept {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
-    g_strapInputAccepted.store(false, std::memory_order_relaxed);
-    g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
+    // Resortcompiled: the startup cover is lifted by MKW's Strap scene HLE (A pressed on the health & safety
+    // screen). WSR's strap screen is its own code with no such hook, so the cover never went away while the game
+    // ran underneath it. Treat the strap as accepted from the start; the cover now only waits for the boot
+    // shaders, and WSR's own warning screen shows (and takes the A press) normally.
+    g_strapInputAccepted.store(true, std::memory_order_relaxed);
+    g_startupDismissFrame.store(0, std::memory_order_relaxed);
     g_bootShadersReady.store(false, std::memory_order_relaxed);
     g_bootShaderNotice = false;
     g_bootShaderWaitStart = {};
@@ -1483,6 +1487,7 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             continue;
         }
         controller_mapping_wizard::HandleSdlEvent(ev->sdl);
+        ResortWiimote::HandleSdlEvent(ev->sdl);
         if (g_rebind.active && (IsToggleKey(ev->sdl, SDL_SCANCODE_BACKSPACE) ||
                                 IsToggleKey(ev->sdl, SDL_SCANCODE_DELETE))) {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
@@ -1535,6 +1540,58 @@ void ReleaseControllers() noexcept {
     if (queued) SDL_Delay(120);
 }
 
+void UpdateDualSensePlayerOne() {
+    int32_t index = PADGetIndexForPort(0);
+    if (index < 0 && !WiiRemoteInput::IsRemoteChannel(0)) {
+        for (uint32_t candidate = 0; candidate < PADCount(); ++candidate) {
+            SDL_Gamepad* pad = PADGetSDLGamepadForIndex(candidate);
+            if (pad && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
+                SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
+                PADSetPortForIndex(candidate, 0);
+                index = static_cast<int32_t>(candidate);
+                g_configuredControllerIndices.fill(std::numeric_limits<int32_t>::min());
+                break;
+            }
+        }
+    }
+    SDL_Gamepad* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
+    const SDL_JoystickID id = pad && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5 &&
+                              SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) ? SDL_GetGamepadID(pad) : 0;
+    static SDL_JoystickID litId = 0;
+    static uint64_t lastLedRequestMs = 0;
+    if (id != litId) {
+        if (litId != 0) {
+            if (SDL_Gamepad* previous = SDL_GetGamepadFromID(litId)) {
+                SDL_SetGamepadLED(previous, 0, 0, 0);
+            }
+        }
+        litId = id;
+        lastLedRequestMs = 0;
+        g_dualSenseLedSupported = id != 0 && SDL_GetBooleanProperty(
+            SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+        g_dualSenseLedRequestOk = false;
+        g_dualSenseLedError.clear();
+    }
+    if (id != 0 && (lastLedRequestMs == 0 || SDL_GetTicks() - lastLedRequestMs >= 2000)) {
+        lastLedRequestMs = SDL_GetTicks();
+        // SDL's PS5 Bluetooth driver may defer the first LED effect until its
+        // connection animation/reset completes. Refresh it after that point.
+        // Keep Aurora's stored color aligned so PADRead cannot restore white.
+        PADSetColor(0, 0, 220, 220);
+        g_dualSenseLedRequestOk = SDL_SetGamepadLED(pad, 0, 220, 220);
+        if (!g_dualSenseLedRequestOk) {
+            const char* error = SDL_GetError();
+            const std::string message = error ? error : "unknown error";
+            if (message != g_dualSenseLedError) {
+                RT_LOG(RT_TAG_CONFIG) << "DualSense LED request failed: " << message << std::endl;
+            }
+            g_dualSenseLedError = message;
+        } else {
+            g_dualSenseLedError.clear();
+        }
+    }
+}
+
 void Draw() noexcept {
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
@@ -1544,6 +1601,7 @@ void Draw() noexcept {
     // its "communications interrupted" prompt without polling pads). Same guest
     // thread as PADRead, so no concurrent access to the scanner's state.
     WiiRemoteInput::Poll();
+    UpdateDualSensePlayerOne();
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();

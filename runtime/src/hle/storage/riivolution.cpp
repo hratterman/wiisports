@@ -8,7 +8,6 @@
 #include "hle/storage/riivolution.h"
 
 #include "hle/riivolution_contract.h"
-#include "hle/web_host_fs.h"
 #include "hle/runtime_parse_helpers.h"
 #include "memory.h"
 #include "nand_path.h"
@@ -37,17 +36,21 @@ struct RiivoState {
 std::once_flag g_riivoOnce;
 RiivoState g_riivoState;
 
-// Host file access goes through WebHostFs: plain std::filesystem natively; on the web the pack
-// may be a streamed mount (/mods/<name>, see hle/web_disc.h).
 std::optional<std::string> RiivoReadFile(const fs::path& path) {
-    return WebHostFs::ReadFile(path);
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream.is_open()) {
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return buffer.str();
 }
 
 // Six-character game ID ("RMCP01") from guest low memory, with the same RMCP
 // fallback the rest of the storage HLE uses for boots that have not written
 // the disc header yet.
 std::string RiivoGameId() {
-    const uint32_t code = RuntimeHle::CurrentGameCode(0x524D4350u); // "RMCP"
+    const uint32_t code = RuntimeHle::CurrentGameCode(0x525A5450u); // "RMCP"
     std::string id(6, '\0');
     id[0] = static_cast<char>((code >> 24) & 0xffu);
     id[1] = static_cast<char>((code >> 16) & 0xffu);
@@ -92,13 +95,13 @@ std::string RiivoComparablePath(const fs::path& path) {
 void RiivoAddRoot(std::vector<RuntimeRiivolution::Overlay>& overlays, fs::path root,
                   const char* source) {
     std::error_code ec;
-    if (!WebHostFs::IsDirectory(root, ec)) {
+    if (!fs::is_directory(root, ec)) {
         RT_LOG(RT_TAG_RIIVOLUTION) << "rejected overlay root (" << (source ? source : "unknown")
                   << "): " << PathToUtf8(root) << " is not a reachable directory" << std::endl;
         return;
     }
 
-    fs::path normalized = WebHostFs::WeaklyCanonical(root, ec);
+    fs::path normalized = fs::weakly_canonical(root, ec);
     if (ec) {
         normalized = root.lexically_normal();
     }
@@ -164,7 +167,7 @@ std::optional<RiivoXmlSet> RiivoFindXmls(const fs::path& overlayRoot) {
     const std::string& configured = RecompMod::RiivolutionXml();
     if (!configured.empty()) {
         const fs::path configuredXml = overlayRoot / PathFromUtf8(configured);
-        if (WebHostFs::IsRegularFile(configuredXml, ec)) {
+        if (fs::is_regular_file(configuredXml, ec)) {
             return RiivoXmlSet{overlayRoot.parent_path(), {configuredXml}};
         }
     }
@@ -172,11 +175,14 @@ std::optional<RiivoXmlSet> RiivoFindXmls(const fs::path& overlayRoot) {
     // Dolphin-style discovery: the overlay root is itself a virtual SD root
     // carrying <root>/riivolution/*.xml.
     const fs::path xmlDirectory = overlayRoot / "riivolution";
-    if (WebHostFs::IsDirectory(xmlDirectory, ec)) {
+    if (fs::is_directory(xmlDirectory, ec)) {
         std::vector<fs::path> xmlFiles;
-        for (fs::path& file : WebHostFs::RegularFilesIn(xmlDirectory, ec)) {
-            if (file.extension() == ".xml") {
-                xmlFiles.push_back(std::move(file));
+        for (const auto& entry : fs::directory_iterator(xmlDirectory, ec)) {
+            if (ec) {
+                break;
+            }
+            if (entry.is_regular_file(ec) && entry.path().extension() == ".xml") {
+                xmlFiles.push_back(entry.path());
             }
         }
         if (!xmlFiles.empty()) {
@@ -218,7 +224,7 @@ void RiivoCollectMappings(const RiivolutionContract::Patch& patch, const std::st
             continue;
         }
         const fs::path hostFile = PathFromUtf8(*resolved);
-        if (!WebHostFs::IsRegularFile(hostFile, ec)) {
+        if (!fs::is_regular_file(hostFile, ec)) {
             ++set.skippedExternals;
             continue;
         }
@@ -234,7 +240,7 @@ void RiivoCollectMappings(const RiivolutionContract::Patch& patch, const std::st
             continue;
         }
         const fs::path hostFolder = PathFromUtf8(*resolved);
-        if (!WebHostFs::IsDirectory(hostFolder, ec)) {
+        if (!fs::is_directory(hostFolder, ec)) {
             ++set.skippedExternals;
             continue;
         }
@@ -243,20 +249,6 @@ void RiivoCollectMappings(const RiivolutionContract::Patch& patch, const std::st
         set.mappings.push_back({kind, folder.disc, hostFolder, folder.recursive, folder.create});
     }
 }
-
-#ifdef __EMSCRIPTEN__
-// On the web a streamed pack is read-only and its virtual SD root (the mount's parent, /mods)
-// is outside the IndexedDB-persisted $HOME. Keep a <savegame> redirect's SD-relative layout but
-// root it in the persisted application data directory instead.
-fs::path RiivoWebSaveDirectory(const fs::path& resolved, const fs::path& sdRoot) {
-    const fs::path relative =
-        resolved.lexically_normal().lexically_relative(sdRoot.lexically_normal());
-    if (relative.empty() || *relative.begin() == "..") {
-        return resolved;
-    }
-    return RuntimeConfigFile::ApplicationDataDirectory() / "riivolution-sd" / relative;
-}
-#endif
 
 std::optional<RuntimeRiivolution::PatchSet> RiivoLoadPatchSet(const fs::path& overlayRoot,
                                                               RiivoState& state) {
@@ -317,14 +309,8 @@ std::optional<RuntimeRiivolution::PatchSet> RiivoLoadPatchSet(const fs::path& ov
             if (const auto* savegame = RiivolutionContract::FindSavegamePatch(activePatches)) {
                 if (const auto resolvedSave = RiivolutionContract::MakeAbsoluteFromRelative(
                         sdRootGeneric, xmlDirGeneric, savegame->external)) {
-                    fs::path saveDirectory = PathFromUtf8(*resolvedSave);
-#ifdef __EMSCRIPTEN__
-                    if (WebDisc::Locate(overlayRoot)) {
-                        saveDirectory = RiivoWebSaveDirectory(saveDirectory, xmlSet->sdRoot);
-                    }
-#endif
                     state.saveRedirect =
-                        RuntimeRiivolution::SaveRedirect{std::move(saveDirectory),
+                        RuntimeRiivolution::SaveRedirect{PathFromUtf8(*resolvedSave),
                                                          savegame->clone};
                     RT_LOG(RT_TAG_RIIVOLUTION) << "savegame redirect: "
                               << PathToUtf8(state.saveRedirect->hostDirectory)

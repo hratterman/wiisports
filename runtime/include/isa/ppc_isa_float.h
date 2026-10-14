@@ -78,7 +78,7 @@ inline void PpcSetPairedFprInline(PPC_FPR& fpr, double packed)
     fpr.d = packed;
 }
 
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
 using PpcPairVec = __m128;
 #elif defined(__aarch64__)
 // Only 2 lanes are ever meaningful (a PPC paired-single register), so a 2-lane float32x2_t
@@ -91,7 +91,7 @@ using PpcPairVec = float32x2_t;
 // local already lives in a vector register, so these casts compile to nothing.
 inline PpcPairVec PpcPsToM128Inline(double value)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_castpd_ps(_mm_set_sd(value));
 #elif defined(__aarch64__)
     return vreinterpret_f32_f64(vdup_n_f64(value));
@@ -100,7 +100,7 @@ inline PpcPairVec PpcPsToM128Inline(double value)
 
 inline double PpcM128ToPsInline(PpcPairVec value)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_cvtsd_f64(_mm_castps_pd(value));
 #elif defined(__aarch64__)
     return vget_lane_f64(vreinterpret_f64_f32(value), 0);
@@ -109,7 +109,7 @@ inline double PpcM128ToPsInline(PpcPairVec value)
 
 inline PpcPairVec PpcBroadcastPs0Inline(double value)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 lanes = PpcPsToM128Inline(value);
     return _mm_shuffle_ps(lanes, lanes, _MM_SHUFFLE(1, 1, 1, 1));
 #elif defined(__aarch64__)
@@ -120,7 +120,7 @@ inline PpcPairVec PpcBroadcastPs0Inline(double value)
 
 inline PpcPairVec PpcBroadcastPs1Inline(double value)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 lanes = PpcPsToM128Inline(value);
     return _mm_shuffle_ps(lanes, lanes, _MM_SHUFFLE(0, 0, 0, 0));
 #elif defined(__aarch64__)
@@ -131,7 +131,7 @@ inline PpcPairVec PpcBroadcastPs1Inline(double value)
 
 inline PpcPairVec PpcNegateNonNanLanesInline(PpcPairVec value)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 signMask = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int>(0x80000000u)));
     const __m128 negated = _mm_xor_ps(value, signMask);
     const __m128 ordered = _mm_cmpord_ps(value, value);
@@ -153,7 +153,7 @@ inline PpcPairVec PpcNegateNonNanLanesInline(PpcPairVec value)
 inline float PpcGetPs0Inline(double value)
 {
     // ps0 lives in lane 1; PpcBroadcastPs0Inline already splats it.
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_cvtss_f32(PpcBroadcastPs0Inline(value));
 #elif defined(__aarch64__)
     return vget_lane_f32(PpcBroadcastPs0Inline(value), 0);
@@ -163,7 +163,7 @@ inline float PpcGetPs0Inline(double value)
 inline float PpcGetPs1Inline(double value)
 {
     // ps1 is already lane 0 of the packed representation.
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_cvtss_f32(PpcPsToM128Inline(value));
 #elif defined(__aarch64__)
     return vget_lane_f32(PpcPsToM128Inline(value), 0);
@@ -172,7 +172,7 @@ inline float PpcGetPs1Inline(double value)
 
 inline double PpcPackPairedInline(float ps0, float ps1)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     // _mm_unpacklo_ps(x, y) -> { x[0], y[0], x[1], y[1] }, so lane 0 becomes
     // ps1 and lane 1 becomes ps0, matching the union layout bit for bit.
     return PpcM128ToPsInline(_mm_unpacklo_ps(_mm_set_ss(ps1), _mm_set_ss(ps0)));
@@ -198,7 +198,7 @@ inline float PpcForceSingleValueInline(double value)
     // flush into a branchless mask: a set compare lane keeps just the sign bit, a clear lane
     // passes the value to the double->float conversion. DAZ/FZ (set exactly when NI is) makes
     // the compare itself treat a subnormal as zero, matching the mask's answer.
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128d v = _mm_set_sd(value);
     const __m128d signMask = _mm_set_sd(-0.0);
     const __m128d magnitude = _mm_andnot_pd(signMask, v);
@@ -573,7 +573,7 @@ inline PpcPairVec PpcResolveNanLanes3Inline(
 
 inline PpcPairVec PpcMulPairInline(PpcPairVec lhs, PpcPairVec rhs)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_mul_ps(lhs, rhs);
 #elif defined(__aarch64__)
     const PpcPairVec result = vmul_f32(lhs, rhs);
@@ -606,19 +606,8 @@ inline double PPC_PsMulNoNiInline(double lhs, double rhs)
 // sign, which x86's vfmsub does not do, so the NaN resolver receives the original subtractor.
 inline PpcPairVec PpcFmaddPairInline(PpcPairVec multiplicand, PpcPairVec multiplier, PpcPairVec addend)
 {
-#if defined(MKW_HOST_X86_SIMD)
-#if defined(__FMA__)
+#if defined(__x86_64__)
     return _mm_fmadd_ps(multiplicand, multiplier, addend);
-#else
-    // x86-64-v2 has SSE4.2 but no FMA. Preserve the one rounding point per
-    // lane through the scalar C++ FMA rather than decomposing into mul+add.
-    const double a = PpcM128ToPsInline(multiplicand);
-    const double c = PpcM128ToPsInline(multiplier);
-    const double b = PpcM128ToPsInline(addend);
-    return PpcPsToM128Inline(PpcPackPairedInline(
-        PpcAccuratePsMaddLaneNoNiInline<false>(PpcGetPs0Inline(a), PpcGetPs0Inline(c), PpcGetPs0Inline(b)),
-        PpcAccuratePsMaddLaneNoNiInline<false>(PpcGetPs1Inline(a), PpcGetPs1Inline(c), PpcGetPs1Inline(b))));
-#endif
 #elif defined(__aarch64__)
     const PpcPairVec result = vfma_f32(addend, multiplicand, multiplier);
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
@@ -629,17 +618,8 @@ inline PpcPairVec PpcFmaddPairInline(PpcPairVec multiplicand, PpcPairVec multipl
 
 inline PpcPairVec PpcFmsubPairInline(PpcPairVec multiplicand, PpcPairVec multiplier, PpcPairVec subtractor)
 {
-#if defined(MKW_HOST_X86_SIMD)
-#if defined(__FMA__)
+#if defined(__x86_64__)
     return _mm_fmsub_ps(multiplicand, multiplier, subtractor);
-#else
-    const double a = PpcM128ToPsInline(multiplicand);
-    const double c = PpcM128ToPsInline(multiplier);
-    const double b = PpcM128ToPsInline(subtractor);
-    return PpcPsToM128Inline(PpcPackPairedInline(
-        PpcAccuratePsMaddLaneNoNiInline<true>(PpcGetPs0Inline(a), PpcGetPs0Inline(c), PpcGetPs0Inline(b)),
-        PpcAccuratePsMaddLaneNoNiInline<true>(PpcGetPs1Inline(a), PpcGetPs1Inline(c), PpcGetPs1Inline(b))));
-#endif
 #elif defined(__aarch64__)
     const PpcPairVec result = vfma_f32(vneg_f32(subtractor), multiplicand, multiplier);
     if (PpcPairNanLaneBitsInline(result) != 0) [[unlikely]]
@@ -742,7 +722,7 @@ inline double PPC_PsToScalarInline(double value)
 inline double PPC_PsMerge00Inline(double aValue, double bValue)
 {
     // result.ps0 = a.ps0, result.ps1 = b.ps0 (lane0 = b.ps0/b lane1, lane1 = a.ps0/a lane1)
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
@@ -754,7 +734,7 @@ inline double PPC_PsMerge00Inline(double aValue, double bValue)
 inline double PPC_PsMerge01Inline(double aValue, double bValue)
 {
     // result.ps0 = a.ps0, result.ps1 = b.ps1 (lane0 = b.ps1/b lane0, lane1 = a.ps0/a lane1)
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(1, 1, 0, 0));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
@@ -766,7 +746,7 @@ inline double PPC_PsMerge01Inline(double aValue, double bValue)
 inline double PPC_PsMerge10Inline(double aValue, double bValue)
 {
     // result.ps0 = a.ps1, result.ps1 = b.ps0 (lane0 = b.ps0/b lane1, lane1 = a.ps1/a lane0)
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     const __m128 gathered = _mm_shuffle_ps(
         PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue), _MM_SHUFFLE(0, 0, 1, 1));
     return PpcM128ToPsInline(_mm_shuffle_ps(gathered, gathered, _MM_SHUFFLE(0, 0, 2, 0)));
@@ -779,7 +759,7 @@ inline double PPC_PsMerge11Inline(double aValue, double bValue)
 {
     // result.ps0 = a.ps1, result.ps1 = b.ps1 (lane0 = b.ps1/b lane0, lane1 = a.ps1/a lane0):
     // plain unpcklps on x86.
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return PpcM128ToPsInline(
         _mm_unpacklo_ps(PpcPsToM128Inline(bValue), PpcPsToM128Inline(aValue)));
 #elif defined(__aarch64__)
@@ -789,7 +769,7 @@ inline double PPC_PsMerge11Inline(double aValue, double bValue)
 
 inline PpcPairVec PpcAddPairInline(PpcPairVec lhs, PpcPairVec rhs)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_add_ps(lhs, rhs);
 #elif defined(__aarch64__)
     const PpcPairVec result = vadd_f32(lhs, rhs);
@@ -801,7 +781,7 @@ inline PpcPairVec PpcAddPairInline(PpcPairVec lhs, PpcPairVec rhs)
 
 inline PpcPairVec PpcSubPairInline(PpcPairVec lhs, PpcPairVec rhs)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_sub_ps(lhs, rhs);
 #elif defined(__aarch64__)
     const PpcPairVec result = vsub_f32(lhs, rhs);
@@ -813,7 +793,7 @@ inline PpcPairVec PpcSubPairInline(PpcPairVec lhs, PpcPairVec rhs)
 
 inline PpcPairVec PpcDivPairInline(PpcPairVec lhs, PpcPairVec rhs)
 {
-#if defined(MKW_HOST_X86_SIMD)
+#if defined(__x86_64__)
     return _mm_div_ps(lhs, rhs);
 #elif defined(__aarch64__)
     const PpcPairVec result = vdiv_f32(lhs, rhs);

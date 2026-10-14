@@ -16,6 +16,7 @@
 #include "ppc_runtime.h"
 #include "fiber_manager.h"
 #include "timebase_contract.h"
+#include "guest_clock.h"
 #include "runtime_log.h"
 #include "os_internal.h"
 
@@ -62,10 +63,13 @@ void ClearOutstandingPark(uint32_t threadPtr)
 
 void ScheduleSleepTimer(uint32_t threadPtr, uint64_t ticks)
 {
-    using Clock = std::chrono::steady_clock;
-
-    const auto duration = TimeBaseContract::TicksToDuration(ticks);
-    const auto deadline = Clock::now() + duration;
+    // Retain the previous duration converter's immediate-expiry behavior for
+    // oversized values (including signed negative durations passed as u64).
+    constexpr uint64_t maxSleepTicks = TimeBaseContract::NanosecondsToTicks(
+        static_cast<uint64_t>(std::chrono::nanoseconds::max().count()));
+    const uint64_t delayTicks = ticks > maxSleepTicks ? 0 : ticks;
+    const auto now = GuestClock::ReadTimeBase();
+    const uint64_t deadline = delayTicks > UINT64_MAX - now ? UINT64_MAX : now + delayTicks;
 
     std::lock_guard<std::mutex> lock(gSleepTimerMutex);
     std::erase_if(gSleepTimers, [threadPtr](const SleepTimerEntry& entry) {
@@ -76,8 +80,6 @@ void ScheduleSleepTimer(uint32_t threadPtr, uint64_t ticks)
 
 bool ProcessSleepTimers(CpuContext* cpu)
 {
-    using Clock = std::chrono::steady_clock;
-
     // Pop and process ONE due timer at a time, straight from the shared table. Resuming a
     // sleeper re-enters the scheduler (OSResumeThread -> SelectThread) and can switch fibers
     // away from this call. Timers that had already been popped into a private list would then
@@ -89,14 +91,14 @@ bool ProcessSleepTimers(CpuContext* cpu)
     bool processedAny = false;
     constexpr size_t kMaxTimersPerCall = 64;
     size_t processedCount = 0;
-    const auto now = Clock::now();
+    const uint64_t now = GuestClock::ReadTimeBase();
     while (processedCount < kMaxTimersPerCall) {
         SleepTimerEntry timer{0, {}};
         bool found = false;
         {
             std::lock_guard<std::mutex> lock(gSleepTimerMutex);
             for (auto it = gSleepTimers.begin(); it != gSleepTimers.end(); ++it) {
-                if (it->deadline <= now) {
+                if (it->deadlineTicks <= now) {
                     timer = *it;
                     gSleepTimers.erase(it);
                     found = true;
@@ -133,7 +135,8 @@ bool ProcessSleepTimers(CpuContext* cpu)
                 }
             }
             if (!present) {
-                gSleepTimers.push_back({threadPtr, now + std::chrono::milliseconds(2)});
+                constexpr uint64_t retryTicks = TimeBaseContract::kTicksPerSecond / 500;
+                gSleepTimers.push_back({threadPtr, now > UINT64_MAX - retryTicks ? UINT64_MAX : now + retryTicks});
             }
             continue;
         }
@@ -147,7 +150,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
 
         ClearOutstandingPark(threadPtr);
         cpu->gpr[3] = threadPtr;
-        OSResumeThread_HLE_801aa58c(cpu);
+        OSResumeThread_HLE_8004e9f0(cpu);
 
         // OSResumeThread only peels one suspension level, so if the sleeper's count is inflated
         // (failed park, overlapping suspend) dropping the timer here would strand it. Keep it armed
@@ -160,24 +163,27 @@ bool ProcessSleepTimers(CpuContext* cpu)
     // race) by resuming it once that shape persists for 100ms, sampled every 50ms so no strand is
     // missed. The atomic CAS below lets exactly one caller run the scan when ProcessSleepTimers
     // executes on more than one host thread; the rest skip it.
-    static std::atomic<Clock::rep> strandScanDueAt{0};
+    static std::atomic<uint64_t> strandScanDueAt{0};
     auto strandScanClaim = strandScanDueAt.load(std::memory_order_relaxed);
     const bool runStrandReconciler =
-        now.time_since_epoch().count() >= strandScanClaim &&
+        now >= strandScanClaim &&
         strandScanDueAt.compare_exchange_strong(
             strandScanClaim,
-            static_cast<Clock::rep>(
-                (now + std::chrono::milliseconds(50)).time_since_epoch().count()),
+            now > UINT64_MAX - TimeBaseContract::kTicksPerSecond / 20 ? UINT64_MAX :
+                now + TimeBaseContract::kTicksPerSecond / 20,
             std::memory_order_relaxed);
     if (runStrandReconciler) {
         static std::mutex strandMutex;
-        static std::unordered_map<uint32_t, Clock::time_point> strandFirstSeen;
+        static std::unordered_map<uint32_t, uint64_t> strandFirstSeen;
 
         std::vector<uint32_t> outstanding;
         {
             std::lock_guard<std::mutex> lock(gOutstandingParkMutex);
             outstanding.assign(gOutstandingParks.begin(), gOutstandingParks.end());
         }
+        // Address ordering is stable across peers; unordered_set iteration is
+        // not a valid order for guest wakeups when multiple threads need repair.
+        std::sort(outstanding.begin(), outstanding.end());
         // Decide who to heal under the lock, but resume OUTSIDE it: the resume
         // re-enters the scheduler and thus this function, and holding the lock
         // across it is a guaranteed self-deadlock.
@@ -193,7 +199,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
                     ++it;
                 }
             }
-            const auto reconcileNow = Clock::now();
+            const auto reconcileNow = GuestClock::ReadTimeBase();
             for (const uint32_t threadPtr : outstanding) {
                 if (SleepTimerIsPending(threadPtr)) {
                     strandFirstSeen.erase(threadPtr);
@@ -218,7 +224,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
                     strandFirstSeen.emplace(threadPtr, reconcileNow);
                     continue;
                 }
-                if (reconcileNow - seen->second < std::chrono::milliseconds(100)) {
+                if (reconcileNow - seen->second < TimeBaseContract::kTicksPerSecond / 10) {
                     continue;
                 }
                 strandFirstSeen.erase(seen);
@@ -231,7 +237,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
                       << std::dec << " park-shaped with no pending wake timer for 100ms; "
                       << "resuming lost sleeper" << std::endl;
             cpu->gpr[3] = threadPtr;
-            OSResumeThread_HLE_801aa58c(cpu);
+            OSResumeThread_HLE_8004e9f0(cpu);
         }
     }
 
@@ -244,7 +250,7 @@ bool ProcessSleepTimers(CpuContext* cpu)
 // thread and resuming it from a host-side timer. A host sleep here starves
 // lower-priority guest workers because the scheduler never gets control.
 // ---------------------------------------------------------------------------
-extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
+extern "C" void OS__SleepTicks_HLE_8004f180(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     if (!cpu) {
@@ -252,7 +258,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
     }
 
     const uint64_t ticks = (static_cast<uint64_t>(cpu->gpr[3]) << 32) | cpu->gpr[4];
-    const int32_t irqState = OS__DisableInterrupts_801a65ac();
+    const int32_t irqState = OS__DisableInterrupts_8004af10();
 
     try {
         uint32_t currentThread = ::Memory::Read32(kOSRunningContextAddr);
@@ -263,7 +269,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
             }
         }
         if (currentThread == 0) {
-            OS__RestoreInterrupts_801a65d4(irqState);
+            OS__RestoreInterrupts_8004af50(irqState);
             return;
         }
 
@@ -283,14 +289,14 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
                           << sleepIdleFlag << "); busy-returning so the caller retries."
                           << std::endl;
             }
-            OS__RestoreInterrupts_801a65d4(irqState);
+            OS__RestoreInterrupts_8004af50(irqState);
             return;
         }
 
         ScheduleSleepTimer(currentThread, ticks);
         MarkParkOutstanding(currentThread);
         cpu->gpr[3] = currentThread;
-        OSSuspendThread_HLE_801aa6a8(cpu);
+        OSSuspendThread_HLE_8004eb08(cpu);
 
         // Defence in depth: SelectThread has other refusal paths (context mismatch, drained run
         // queues), and there's a fire-before-park race where the timer fires and its resume is
@@ -326,9 +332,9 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
         LogMemoryError(RT_TAG_OS, "OSSleepTicks", e);
     }
 
-    OS__RestoreInterrupts_801a65d4(irqState);
+    OS__RestoreInterrupts_8004af50(irqState);
 }
-REGISTER_NATIVE_FUNCTION(0x801AACA8, OS__SleepTicks_HLE_801aaca8);
+REGISTER_NATIVE_FUNCTION(0x8004F180, OS__SleepTicks_HLE_8004f180);
 
 namespace {
 // OSSleepThread must reach SelectThread with the scheduler-disable count at zero, or the thread
@@ -388,9 +394,9 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
 }
 } // namespace
 
-// OSSleepThread (0x801aa9b8)
+// OSSleepThread (0x8004ee20)
 // Puts the current thread to sleep on a specified wait queue.
-extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
+extern "C" void OSSleepThread_HLE_8004ee20(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     const uint32_t queuePtr = cpu->gpr[3];
@@ -400,7 +406,7 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         return;
     }
 
-    const int32_t irqState = OS__DisableInterrupts_801a65ac();
+    const int32_t irqState = OS__DisableInterrupts_8004af10();
     
     try {
         uint32_t currentThread = ::Memory::Read32(kOSRunningContextAddr);
@@ -411,12 +417,12 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
             currentThread = kDefaultThreadContextAddr;
             if (!Memory::Contains(currentThread, 4)) {
                 RT_LOG(RT_TAG_OS) << "OSSleepThread: no current thread and default thread not valid!" << std::endl;
-                OS__RestoreInterrupts_801a65d4(irqState);
+                OS__RestoreInterrupts_8004af50(irqState);
                 return;
             }
             // Set the default thread as current (both running and context)
             ::Memory::Write32(kOSRunningContextAddr, currentThread);
-            OS__SetCurrentContext_801a1e70(currentThread);
+            OS__SetCurrentContext_800469b0(currentThread);
             
             // Also register as a fiber if not already
             if (Fiber::GuestFiberManager::IsInitialized() && 
@@ -432,7 +438,7 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         // queue untouched and let the caller's retry loop re-test its condition.
         if (!SchedulerCanSwitchAway()) {
             ReportUnparkableSleep(queuePtr, currentThread);
-            OS__RestoreInterrupts_801a65d4(irqState);
+            OS__RestoreInterrupts_8004af50(irqState);
             return;
         }
 
@@ -458,7 +464,7 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         
         // Match the original SDK behavior: sleep yields via SelectThread(0).
         cpu->gpr[3] = 0;
-        SelectThread_801a9c08(cpu);
+        SelectThread_8004e030(cpu);
 
         // Defence in depth: SelectThread has other paths that return without switching (context
         // mismatch, uninitialised thread system, a run queue that drained mid-enqueue). None of
@@ -485,6 +491,6 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         LogMemoryError(RT_TAG_OS, "OSSleepThread", e);
     }
     
-    OS__RestoreInterrupts_801a65d4(irqState);
+    OS__RestoreInterrupts_8004af50(irqState);
 }
-PPC_NATIVE_OVERRIDE_VOID(801AA9B8, OSSleepThread_HLE_801aa9b8, (CpuContext* ctx), (ctx));
+PPC_NATIVE_OVERRIDE_VOID(8004EE20, OSSleepThread_HLE_8004ee20, (CpuContext* ctx), (ctx));

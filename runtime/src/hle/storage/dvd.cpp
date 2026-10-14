@@ -9,17 +9,11 @@
 // layer's caches must be notified explicitly that these bytes changed.
 extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include "hle/storage/riivolution.h"
-#include "hle/web_host_fs.h"
 #include "ppc_runtime.h"
 #include "recomp_mod_loader.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
-#ifdef __EMSCRIPTEN__
-// Web build: the disc is the operator-hosted tree described by disc-manifest.json, mapped to
-// WebDisc::RootPath() and streamed over HTTP Range (see runtime/include/hle/web_disc.h).
-#include "hle/web_disc.h"
-#endif
 
 #include <cstdint>
 #include <cstdlib>
@@ -50,7 +44,7 @@ static fs::path g_dvdRoot;
 static std::once_flag g_dvdRootOnce;
 
 static uint32_t CurrentDiscGameCode() {
-    return RuntimeHle::CurrentGameCode(0x524D4350u); // RMCP
+    return RuntimeHle::CurrentGameCode(0x525A5450u); // RMCP
 }
 
 // ============================================================================
@@ -103,7 +97,7 @@ static bool g_fstLoaded = false;
 static std::unordered_set<std::string> g_loggedReadErrors;
 static constexpr int32_t kDvdFatalError = -3;
 
-extern "C" void DVDInit_8015EA1C();
+extern "C" void DVDInit_8009B160();
 
 // This MEM2 region is reserved at startup for the published FST.
 extern "C" uint32_t g_dvdFstReservedBase;
@@ -161,25 +155,6 @@ static bool IsDvdDataRoot(const fs::path& path) {
 
 static const fs::path& GetDvdRoot() {
     std::call_once(g_dvdRootOnce, []() {
-#ifdef __EMSCRIPTEN__
-        // [paths] dvd_root is not consulted on the web: the disc always comes from the site.
-        std::string error;
-        if (!WebDisc::EnsureLoaded(&error)) {
-            RT_LOGF(RT_TAG_DVD, "ERROR: %s\n", error.c_str());
-            FailDvd("dvd_root", "DVD data is unavailable",
-                    "The game data could not be loaded from this site.\n\n" + error);
-        }
-        if (!WebDisc::IsDataRoot()) {
-            const std::string details =
-                "The hosted disc tree at " + WebDisc::BaseUrl() +
-                " is not an extracted DATA directory (its manifest lists no files/ directory "
-                "or no sys/fst.bin).";
-            RT_LOGF(RT_TAG_DVD, "ERROR: %s\n", details.c_str());
-            FailDvd("dvd_root", "DVD data is unavailable", details);
-        }
-        g_dvdRoot = WebDisc::RootPath();
-        return;
-#endif
         const fs::path path = RuntimeConfigFile::ResolvedDvdRoot();
         if (path.empty()) {
             FailDvdRoot("No DVD root is configured");
@@ -264,13 +239,6 @@ static void LoadFstIndex() {
     g_fstLoaded = true;
 
     const fs::path fstPath = GetDvdRoot() / "sys" / "fst.bin";
-#ifdef __EMSCRIPTEN__
-    std::vector<uint8_t> data;
-    const auto fstRelPath = WebDisc::RelativePath(fstPath);
-    if (!fstRelPath || !WebDisc::ReadWhole(*fstRelPath, data) || data.size() < 12) {
-        return;
-    }
-#else
     std::ifstream fstFile(fstPath, std::ios::binary);
     if (!fstFile.is_open()) {
         return;
@@ -288,7 +256,6 @@ static void LoadFstIndex() {
     if (!fstFile) {
         return;
     }
-#endif
 
     const uint32_t entryCount = BigEndian::Read32(&data[8]);
     if (entryCount == 0 || entryCount > 0x10000) {
@@ -400,7 +367,7 @@ struct AbsReadResult {
 
 static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out) {
     // The extent table is available after DVDInit publishes the FST.
-    DVDInit_8015EA1C();
+    DVDInit_8009B160();
     const PublishedExtent* extent = FindPublishedExtentForByteOffset(offset);
     uint64_t effectiveOffset = offset;
 
@@ -506,28 +473,6 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
 // the disc may be replaced, nothing new is added.
 static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix,
                           bool recursive = true, bool addNewFiles = true) {
-#ifdef __EMSCRIPTEN__
-    // Hosted trees (the disc, a streamed mod pack) have no Emscripten FS presence; their
-    // listing is the manifest.
-    {
-        std::string prefix = virtualPrefix.empty() ? "/" : virtualPrefix;
-        if (prefix.back() != '/' && prefix.back() != '\\') {
-            prefix += "/";
-        }
-        const bool mounted = WebHostFs::ForEachMountedFile(
-            root, recursive,
-            [&](const fs::path& hostPath, const std::string& relativeToRoot, uint64_t size) {
-                std::string dvdPath = prefix + relativeToRoot;
-                if (!addNewFiles && !DvdEntryExists(dvdPath)) {
-                    return;
-                }
-                RegisterFileEntry(std::move(dvdPath), hostPath, static_cast<uint32_t>(size));
-            });
-        if (mounted) {
-            return;
-        }
-    }
-#endif
     std::error_code ec;
     if (!fs::exists(root, ec)) {
         return;
@@ -605,26 +550,9 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
         }
     };
 
-#ifdef __EMSCRIPTEN__
-    const bool mounted = WebHostFs::ForEachMountedFile(
-        mapping.hostPath, mapping.recursive,
-        [&](const fs::path& hostPath, const std::string&, uint64_t size) {
-            std::string name = HostPathText(hostPath.filename());
-            RuntimeHle::LowerInPlace(name);
-            const auto matches = discPathsByName.find(name);
-            if (matches == discPathsByName.end()) {
-                return;
-            }
-            for (const std::string& dvdPath : matches->second) {
-                RegisterFileEntry(dvdPath, hostPath, static_cast<uint32_t>(size));
-                ++replaced;
-            }
-        });
-    if (!mounted)
-#endif
     WalkDirectory(mapping.hostPath, mapping.recursive, /*announceErrors=*/false, applyEntry);
 
-    RT_LOG_INFO(RT_TAG_DVD) << HostPathText(mapping.hostPath) << ": replaced " << replaced
+    RT_LOG(RT_TAG_DVD) << HostPathText(mapping.hostPath) << ": replaced " << replaced
               << " disc file(s) by filename" << std::endl;
 }
 
@@ -646,7 +574,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
                 break;
             }
             std::error_code ec;
-            const std::uintmax_t size = WebHostFs::FileSize(mapping.hostPath, ec);
+            const std::uintmax_t size = fs::file_size(mapping.hostPath, ec);
             if (!ec) {
                 RegisterFileEntry(mapping.discPath, mapping.hostPath, static_cast<uint32_t>(size));
             }
@@ -673,7 +601,7 @@ static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::p
     for (const auto& overlay : RuntimeRiivolution::Overlays()) {
         const fs::path candidate = overlay.root / fs::path(normalized.substr(1));
         std::error_code ec;
-        if (WebHostFs::IsRegularFile(candidate, ec)) {
+        if (fs::is_regular_file(candidate, ec)) {
             return candidate;
         }
     }
@@ -780,7 +708,7 @@ static void BuildAndPublishRuntimeFst() {
     Memory::Write32(0x80000038u, fstAddress);
     Memory::Write32(0x8000003Cu, static_cast<uint32_t>(image.bytes.size()));
 
-    RT_LOG_INFO(RT_TAG_DVD) << "published " << image.entries.size() << " FST entries ("
+    RT_LOG(RT_TAG_DVD) << "published " << image.entries.size() << " FST entries ("
               << image.bytes.size() << " bytes) at 0x" << std::hex << fstAddress
               << " inside the boot-time MEM2 reservation" << std::dec << std::endl;
 
@@ -788,7 +716,7 @@ static void BuildAndPublishRuntimeFst() {
         std::ofstream dump(dumpPath, std::ios::binary);
         dump.write(reinterpret_cast<const char*>(image.bytes.data()),
                    static_cast<std::streamsize>(image.bytes.size()));
-        RT_LOG_INFO(RT_TAG_DVD) << "dumped published FST to " << dumpPath << std::endl;
+        RT_LOG(RT_TAG_DVD) << "dumped published FST to " << dumpPath << std::endl;
     }
 }
 
@@ -801,7 +729,7 @@ extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath)
         return nullptr;
     }
 
-    DVDInit_8015EA1C();
+    DVDInit_8009B160();
     const std::string normalized = NormalizePath(dvdPath);
     const auto it = g_pathToEntry.find(normalized);
     if (it == g_pathToEntry.end() ||
@@ -821,7 +749,7 @@ extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath)
 
 static void InitDvdWaitingQueues()
 {
-    constexpr uint32_t kQueueBase = 0x80343230;
+    constexpr uint32_t kQueueBase = 0x80769270;
     for (uint32_t i = 0; i < 4; ++i) {
         const uint32_t queue = kQueueBase + (i * 8);
         Memory::Write32(queue + 0, queue);
@@ -835,16 +763,16 @@ static void CompleteDvdCancelState()
 
     // These are the SDK DVD globals used by DVDCancelAll/__DVDPrepareReset.
     // The actual drive work is HLE'd, so complete pending cancel/reset waits.
-    Memory::Write32(0x80386664, 0); // Canceling
-    Memory::Write32(0x80386668, 0); // ResumeFromHere
-    Memory::Write32(0x80386670, 0); // PausingFlag
+    Memory::Write32(0x806F4B44, 0); // Canceling
+    Memory::Write32(0x806F4B48, 0); // ResumeFromHere
+    Memory::Write32(0x806F4B50, 0); // PausingFlag
     Memory::Write32(0x8038667C, 1); // CancelAllSync complete
-    Memory::Write32(0x803866A8, 1); // PrepareReset complete
-    Memory::Write32(0x803866F0, 0); // executing command block
+    Memory::Write32(0x806F4B84, 1); // PrepareReset complete
+    Memory::Write32(0x806F4BD0, 0); // executing command block
 }
 
-// 0x8015EA1C -> DVDInit
-extern "C" void DVDInit_8015EA1C()
+// 0x8009B160 -> DVDInit
+extern "C" void DVDInit_8009B160()
 {
     if (g_dvdInitialized) return;
     // The scan below builds g_fileEntries incrementally, so a re-entrant call
@@ -857,14 +785,14 @@ extern "C" void DVDInit_8015EA1C()
 
     // 1. Initialize Global Flags (Emulate OS state)
     // These addresses are standard OS globals for DVD context
-    Memory::Write8(0x80386724, 1);   // Contexts initialized
-    Memory::Write8(0x80386725, 1);   // LowInit called
-    Memory::Write32(0x80386720, 0);  // Current context index
-    Memory::Write8(0x803866a0, 1);   // DVDInit called flag
+    Memory::Write8(0x806F4C04, 1);   // Contexts initialized
+    Memory::Write8(0x806F4C05, 1);   // LowInit called
+    Memory::Write32(0x806F4C00, 0);  // Current context index
+    Memory::Write8(0x806f4b7c, 1);   // DVDInit called flag
     CompleteDvdCancelState();
 
     // 2. Initialize DVD Context structures (prevent crashes in callbacks)
-    constexpr uint32_t kContextBase = 0x803434e0;
+    constexpr uint32_t kContextBase = 0x80769520;
     constexpr uint32_t kMagicValue = 0xFEEBDAED;
     for (int i = 0; i < 4; i++) {
         uint32_t ctx = kContextBase + i * 0x20;
@@ -903,7 +831,7 @@ extern "C" void DVDInit_8015EA1C()
     for (auto overlay = overlays.rbegin(); overlay != overlays.rend(); ++overlay) {
         ScanOverlayRoot(*overlay);
     }
-    RT_LOG_INFO(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
+    RT_LOG(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
               << (g_fileEntries.size() - vanillaEntryCount) << " overlay registration(s) from "
               << overlays.size() << " root(s)" << std::endl;
 
@@ -912,7 +840,7 @@ extern "C" void DVDInit_8015EA1C()
     BuildAndPublishRuntimeFst();
 
     // Initialize the translated DVD filesystem so it can use the published FST.
-    constexpr uint32_t kDvdFsInitAddress = 0x8015DF1C;
+    constexpr uint32_t kDvdFsInitAddress = 0x8009A5F0;
     if (TranslatedFunctionRegistry::FindByAddressPtr(kDvdFsInitAddress)) {
         InvokeIndirectCpu(kDvdFsInitAddress, &GetPersistentCpuContext());
     }
@@ -920,12 +848,12 @@ extern "C" void DVDInit_8015EA1C()
     g_dvdInitialized = true;
     initializing = false;
 }
-PPC_NATIVE_OVERRIDE_VOID(8015EA1C, DVDInit_8015EA1C, (), ());
+PPC_NATIVE_OVERRIDE_VOID(8009B160, DVDInit_8009B160, (), ());
 
 // FST-only DVD functions run translated so mods can override them safely.
 
-// 0x8015E834 -> DVDReadPrio
-extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr, int32_t length, int32_t offset, int32_t prio)
+// 0x8009AF50 -> DVDReadPrio
+extern "C" int32_t DVDReadPrio_8009AF50(uint32_t fileInfoPtr, uint32_t bufferPtr, int32_t length, int32_t offset, int32_t prio)
 {
     (void)prio;
 
@@ -989,30 +917,30 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
 
     return static_cast<int32_t>(uLength);
 }
-PPC_NATIVE_OVERRIDE(8015E834, DVDReadPrio_8015E834, int32_t, (uint32_t f, uint32_t b, int32_t l, int32_t o, int32_t p), (f, b, l, o, p));
+PPC_NATIVE_OVERRIDE(8009AF50, DVDReadPrio_8009AF50, int32_t, (uint32_t f, uint32_t b, int32_t l, int32_t o, int32_t p), (f, b, l, o, p));
 
-// 0x8015E74C -> DVDReadAsyncPrio (internal)
+// 0x8009AE60 -> DVDReadAsyncPrio (internal)
 // HLE: perform synchronous read and invoke callback immediately.
-extern "C" int32_t DVD__ReadAsyncPrio_HLE_8015e74c(uint32_t fileInfoPtr,
+extern "C" int32_t DVD__ReadAsyncPrio_HLE_8009ae60(uint32_t fileInfoPtr,
                                                    uint32_t bufferPtr,
                                                    int32_t length,
                                                    int32_t offset,
                                                    uint32_t callbackPtr,
                                                    int32_t prio)
 {
-    const int32_t bytesRead = DVDReadPrio_8015E834(fileInfoPtr, bufferPtr, length, offset, prio);
+    const int32_t bytesRead = DVDReadPrio_8009AF50(fileInfoPtr, bufferPtr, length, offset, prio);
 
     InvokeDvdCallback(callbackPtr, bytesRead, fileInfoPtr);
     CompleteDvdCancelState();
     return bytesRead >= 0 ? 1 : 0;
 }
-PPC_NATIVE_OVERRIDE(8015E74C, DVD__ReadAsyncPrio_HLE_8015e74c, int32_t,
+PPC_NATIVE_OVERRIDE(8009AE60, DVD__ReadAsyncPrio_HLE_8009ae60, int32_t,
          (uint32_t f, uint32_t b, int32_t l, int32_t o, uint32_t cb, int32_t p),
          (f, b, l, o, cb, p));
 
-// 0x801628CC -> DVDReadAbsAsyncPrio (internal)
+// 0x8009F0F0 -> DVDReadAbsAsyncPrio (internal)
 // HLE: resolve the absolute disc offset to a host file and read it.
-extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
+extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_8009f0f0(uint32_t cmdBlockPtr,
                                                       uint32_t bufferPtr,
                                                       int32_t length,
                                                       int32_t offset,
@@ -1071,7 +999,7 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
     CompleteDvdCancelState();
     return bytesRead >= 0 ? 1 : 0;
 }
-PPC_NATIVE_OVERRIDE(801628CC, DVD__ReadAbsAsyncPrio_HLE_801628cc, int32_t,
+PPC_NATIVE_OVERRIDE(8009F0F0, DVD__ReadAbsAsyncPrio_HLE_8009f0f0, int32_t,
          (uint32_t cb, uint32_t b, int32_t l, int32_t o, uint32_t cbfn, int32_t p),
          (cb, b, l, o, cbfn, p));
 
@@ -1080,15 +1008,15 @@ PPC_NATIVE_OVERRIDE(801628CC, DVD__ReadAbsAsyncPrio_HLE_801628cc, int32_t,
 // Low-Level / Core DVD (The "Magic" Handlers)
 // ============================================================================
 
-// 0x80164848 -> DVDLowInit
-extern "C" int32_t DVDLowInit_80164848() {
+// 0x800A1260 -> DVDLowInit
+extern "C" int32_t DVDLowInit_800A1260() {
     // Just ensure init is done
-    DVDInit_8015EA1C(); 
+    DVDInit_8009B160(); 
     return 1;
 }
-PPC_NATIVE_OVERRIDE(80164848, DVDLowInit_80164848, int32_t, (), ());
+PPC_NATIVE_OVERRIDE(800A1260, DVDLowInit_800A1260, int32_t, (), ());
 
-extern "C" int32_t DVDLowInquiry_80165A30(uint32_t cmdBlockPtr, uint32_t callback)
+extern "C" int32_t DVDLowInquiry_800A24A0(uint32_t cmdBlockPtr, uint32_t callback)
 {
     // HLE: acknowledge the drive is present. Must mark the command block complete
     // (State = 0) or callers polling this address hang waiting for "Busy" to clear.
@@ -1099,10 +1027,10 @@ extern "C" int32_t DVDLowInquiry_80165A30(uint32_t cmdBlockPtr, uint32_t callbac
 
     return 1; // Return 1 to indicate the command was successfully issued.
 }
-PPC_NATIVE_OVERRIDE(80165A30, DVDLowInquiry_80165A30, int32_t, (uint32_t b, uint32_t c), (b, c));
+PPC_NATIVE_OVERRIDE(800A24A0, DVDLowInquiry_800A24A0, int32_t, (uint32_t b, uint32_t c), (b, c));
 
-// 0x80164AAC -> DVDLowReadDiskID
-extern "C" int32_t DVDLowReadDiskID_80164AAC(uint32_t diskIdPtr, uint32_t callback) {
+// 0x800A14D0 -> DVDLowReadDiskID
+extern "C" int32_t DVDLowReadDiskID_800A14D0(uint32_t diskIdPtr, uint32_t callback) {
     if (diskIdPtr) {
         Memory::Write32(diskIdPtr + 0x00, CurrentDiscGameCode());
         Memory::Write16(diskIdPtr + 0x04, 0x3031);
@@ -1111,11 +1039,11 @@ extern "C" int32_t DVDLowReadDiskID_80164AAC(uint32_t diskIdPtr, uint32_t callba
     CompleteDvdCancelState();
     return 1; // Success
 }
-PPC_NATIVE_OVERRIDE(80164AAC, DVDLowReadDiskID_80164AAC, int32_t, (uint32_t p, uint32_t c), (p, c));
+PPC_NATIVE_OVERRIDE(800A14D0, DVDLowReadDiskID_800A14D0, int32_t, (uint32_t p, uint32_t c), (p, c));
 
-// 0x80166330 -> DVDLowRead (And 0x80165708 UnencryptedRead)
+// 0x800A2DE0 -> DVDLowRead (And 0x800A2160 UnencryptedRead)
 // The game calls this to read the Disk Header (offset 0) or raw data.
-extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_t offset, uint32_t callback)
+extern "C" int32_t DVDLowRead_800A2DE0(uint32_t buffer, uint32_t length, uint32_t offset, uint32_t callback)
 {
     const auto finish = [callback](bool succeeded) {
         const auto completion = DvdReadContract::CompletionFor(succeeded);
@@ -1172,21 +1100,21 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
     CopyToGuestAsDma(buffer, tempBuf.data(), tempBuf.size());
     return finish(true);
 }
-PPC_NATIVE_OVERRIDE(80166330, DVDLowRead_80166330, int32_t, (uint32_t b, uint32_t l, uint32_t o, uint32_t c), (b, l, o, c));
+PPC_NATIVE_OVERRIDE(800A2DE0, DVDLowRead_800A2DE0, int32_t, (uint32_t b, uint32_t l, uint32_t o, uint32_t c), (b, l, o, c));
 
 // UnencryptedRead has the same completion and failure contract as DVDLowRead.
-extern "C" int32_t DVDLowUnencryptedRead_80165708(uint32_t b, uint32_t l, uint32_t o, uint32_t c) {
-    return DVDLowRead_80166330(b, l, o, c);
+extern "C" int32_t DVDLowUnencryptedRead_800A2160(uint32_t b, uint32_t l, uint32_t o, uint32_t c) {
+    return DVDLowRead_800A2DE0(b, l, o, c);
 }
-PPC_NATIVE_OVERRIDE(80165708, DVDLowUnencryptedRead_80165708, int32_t, (uint32_t b, uint32_t l, uint32_t o, uint32_t c), (b, l, o, c));
+PPC_NATIVE_OVERRIDE(800A2160, DVDLowUnencryptedRead_800A2160, int32_t, (uint32_t b, uint32_t l, uint32_t o, uint32_t c), (b, l, o, c));
 
 // ============================================================================
 // Other Necessary Stubs
 // ============================================================================
 
-extern "C" int32_t DVDCheckDevice_801643FC() { return 1; } // Ready
-PPC_NATIVE_OVERRIDE(801643FC, DVDCheckDevice_801643FC, int32_t, (), ());
+extern "C" int32_t DVDCheckDevice_800A0E10() { return 1; } // Ready
+PPC_NATIVE_OVERRIDE(800A0E10, DVDCheckDevice_800A0E10, int32_t, (), ());
 
-extern "C" int32_t DVDLowClearCoverInterrupt_80166964(uint32_t cb) { return 1; }
-PPC_NATIVE_OVERRIDE(80166964, DVDLowClearCoverInterrupt_80166964, int32_t, (uint32_t cb), (cb));
+extern "C" int32_t DVDLowClearCoverInterrupt_800A35C0(uint32_t cb) { return 1; }
+PPC_NATIVE_OVERRIDE(800A35C0, DVDLowClearCoverInterrupt_800A35C0, int32_t, (uint32_t cb), (cb));
 

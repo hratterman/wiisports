@@ -24,14 +24,14 @@ uint32_t g_lastEggWidth169 = 0;
 
 // EGG::Screen's static canvas records (PAL). See gx_dynamic_aspect.h for the
 // record layout and the anamorphic presentation model.
-constexpr uint32_t kEggScreenRecord43 = 0x802A3EE8u;
-constexpr uint32_t kEggScreenRecord169 = 0x802A3EF4u;
-constexpr uint32_t kEggActiveScreenPtr = 0x80386F14u;
+constexpr uint32_t kEggScreenRecord43 = 0x806B5178u;
+constexpr uint32_t kEggScreenRecord169 = 0x806B5184u;
+constexpr uint32_t kEggActiveScreenPtr = 0x806F4FDCu;
 
-constexpr uint32_t kEggScreenProjScaleX = 0x80386F20u;
-constexpr uint32_t kEggScreenProjScaleY = 0x80386F24u;
+constexpr uint32_t kEggScreenProjScaleX = 0x806F4FE8u;
+constexpr uint32_t kEggScreenProjScaleY = 0x806F4FECu;
 
-constexpr uint32_t kEggScreenAspectHandler = 0x8023E53Cu;
+constexpr uint32_t kEggScreenAspectHandler = 0x801B98C8u;
 
 constexpr uint32_t kMkwUpdateAllScreens = 0x805653D0u;
 constexpr uint32_t kMkwGfxDrawList = 0x809C1830u;
@@ -39,13 +39,13 @@ constexpr uint32_t kSystemManagerInstance = 0x80386000u;
 
 // The draw list is an nw4r::ut::List: +0x00 head, +0x04 tail, +0x08 u16 count,
 // +0x0A u16 link offset, with next = *(node + linkOffset + 4) (List_GetNext,
-// 0x800AF180).
+// 0x8010BC00).
 constexpr uint32_t kMkwGfxDrawListLinkOffset = 0x0Au;
 
 constexpr uint32_t kMkwGfxOffscreenList = 0x809C183Cu;
 constexpr uint32_t kMkwGfxOffscreenNodeScreenSlot = 0x10u;
 constexpr uint32_t kEggScreenVTableOffset = 0x38u;
-constexpr uint32_t kEggScreenVTable = 0x802A3F0Cu;
+constexpr uint32_t kEggScreenVTable = 0x806B519Cu;
 constexpr uint32_t kMkwScreenVTable = 0x808B4C20u;
 constexpr uint32_t kEggScreenFlagsOffset = 0x34u;
 constexpr uint16_t kEggScreenFlagFramebufferCanvas = 0x0008u;
@@ -129,6 +129,9 @@ void WriteEggScreenRecord(uint32_t recordAddr, uint32_t width) {
 }
 
 void ApplyEggScreenRecords(uint32_t surfaceWidth, uint32_t surfaceHeight) {
+    // Resortcompiled: MKW EGG::Screen canvas records live at MKW-only addresses; skip until ported to WSR.
+    (void)surfaceWidth; (void)surfaceHeight;
+    return;
     using namespace MkwDynamicAspect;
     const uint32_t width43 =
         g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
@@ -163,6 +166,7 @@ void ApplyEggScreenRecords(uint32_t surfaceWidth, uint32_t surfaceHeight) {
 
 
 void AssertMkwOffscreenScreenBypass() {
+    return;  // Resortcompiled: walks MKW gfx node lists at MKW heap addresses
     static int lastSweptFrame = -1;
     if (lastSweptFrame == g_gxFrameCount) {
         return;

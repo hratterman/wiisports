@@ -23,7 +23,7 @@ EMSCRIPTEN_TESTED=6.0.12
 TARGET=WiiCompiled            # the runtime's CMake product name; the page loads TARGET.js
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-workspace=$(cd "$script_dir/.." && pwd)
+workspace=${WSR_WORKSPACE:-$(cd "$script_dir/.." && pwd)}
 step_no=0
 step() { step_no=$((step_no + 1)); printf '\n==> [%d] %s\n' "$step_no" "$*"; }
 info() { printf '    %s\n' "$*"; }

@@ -255,7 +255,10 @@ function(mkw_configure_web_product target)
         --emit-symbol-map
         -lidbfs.js
         "--embed-file=${dsp_rom}@/app/dsp_coef.bin"
-        "--embed-file=${bootstrap}@/app/wii_bootstrap")
+        "--embed-file=${bootstrap}@/app/wii_bootstrap"
+        # IPL replacement fonts for resort_ipl_rom.cpp (it looks in <executable dir>/fonts).
+        "--embed-file=${MKW_RUNTIME_SOURCE_DIR}/assets/fonts/font_western.bin@/app/fonts/font_western.bin"
+        "--embed-file=${MKW_RUNTIME_SOURCE_DIR}/assets/fonts/font_japanese.bin@/app/fonts/font_japanese.bin")
     foreach(library IN LISTS js_libraries)
         target_link_options(${target} PRIVATE "--js-library=${library}")
         set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${library}")

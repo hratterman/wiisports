@@ -238,7 +238,7 @@ step_cloudflare() {
     elif [[ -n "${WSR_TUNNEL_TOKEN:-}" ]]; then
         (umask 077; printf '%s' "$WSR_TUNNEL_TOKEN" > "$token_file")
     fi
-    [[ -s "$token_file" ]] || die "no tunnel token: set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID (preferred) or WSR_TUNNEL_TOKEN in $env_file"
+    [[ -s "$token_file" ]] || die "no tunnel token: set WSR_TUNNEL_TOKEN in $env_file (Henry has it; see host/macmini/README.md)"
     write_agent "$LABEL_TUNNEL" "$bin/cloudflared" tunnel --no-autoupdate run --token-file "$token_file"
     info "tunnel connector started"
 }

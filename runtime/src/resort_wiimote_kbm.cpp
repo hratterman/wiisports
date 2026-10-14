@@ -360,6 +360,10 @@ struct HostInput {
     bool tilt = false, shake = false, recenter = false;
     bool nunchuk = false, nunchukShake = false, pedal = false;
     double stick[2] = {0, 0};
+    // Calibrated absolute orientation (phone): replaces gyro integration for the pointer and roll.
+    bool absolute = false;
+    ResortMotion::Quaternion pose;
+    double halfFovX = kHalfFovX, halfFovY = kHalfFovY;
     Vec3 gyro;
     Vec3 acc;
     bool accValid = false;
@@ -408,6 +412,17 @@ void ReadPhone(HostInput& in) {
                                      kBtnB | kBtnA | kBtnMinus | kBtnHome | (in.nunchuk ? kBtnZ | kBtnC : 0u));
     in.recenter = (flags & WebPhone::kFlagRecenter) != 0;
     in.shake = (flags & WebPhone::kFlagShake) != 0;
+    if (flags & WebPhone::kFlagAbsolute) {
+        double q[4], hx = 0, hy = 0;
+        WebPhone::Orientation(q, hx, hy);
+        const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (std::isfinite(n) && n > 0.5 && hx > 2 * kDeg && hx < 80 * kDeg && hy > 2 * kDeg && hy < 80 * kDeg) {
+            in.absolute = true;
+            in.pose = {q[0] / n, q[1] / n, q[2] / n, q[3] / n};
+            in.halfFovX = hx;
+            in.halfFovY = hy;
+        }
+    }
     if (in.nunchuk) {
         in.nunchukShake = (flags & WebPhone::kFlagNunchukShake) != 0;
         in.pedal = (flags & WebPhone::kFlagPedal) != 0;
@@ -806,7 +821,8 @@ uint32_t StepController(const HostInput& in) {
     Remote& r=CurrentRemote();
     if(in.recenter && !r.recenterHeld) {
         if (Tape::Recording() || Online::Active()) g_capture.recenter = true;
-        r.pointerPose={};
+        // An absolute pose is recentred by its source (the phone recaptures the screen's middle).
+        if(!in.absolute)r.pointerPose={};
         if (!Online::Active()) {
             GuestInterruptCallbackContext call;
             call.get()->gpr[3]=0;
@@ -815,6 +831,8 @@ uint32_t StepController(const HostInput& in) {
     }
     r.recenterHeld=in.recenter;
     r.nunchuk=in.nunchuk;
+    // Calibrated phone: the pointer pose is measured, not integrated, so it cannot drift.
+    if(in.absolute)r.pointerPose=in.pose;
     std::deque<Sample> generated;
     const auto emit=[&](Vec3 gyro,Vec3 acc,double dt) {
         Sample s;
@@ -838,8 +856,8 @@ uint32_t StepController(const HostInput& in) {
         }
         const Vec3 forward=r.pointerPose.rotate({0,0,-1});
         if(forward.z<-.2) {
-            s.posX=forward.x/-forward.z/std::tan(kHalfFovX);
-            s.posY=-forward.y/-forward.z/std::tan(kHalfFovY);
+            s.posX=forward.x/-forward.z/std::tan(in.halfFovX);
+            s.posY=-forward.y/-forward.z/std::tan(in.halfFovY);
             s.pointerValid=std::abs(s.posX)<=1.15 && std::abs(s.posY)<=1.15;
         }
         s.roll=std::atan2(s.R.m[0][1],s.R.m[1][1]);
@@ -859,7 +877,7 @@ uint32_t StepController(const HostInput& in) {
         const Vec3 gyro=r.bias.correct(report.gyro,report.acc,dt);
         while(dt>1e-9) {
             const double part=std::min(dt,1.0/kSampleHz-r.binTime);
-            r.pointerPose.integrate(gyro,part);
+            if(!in.absolute)r.pointerPose.integrate(gyro,part);
             r.binGyro=r.binGyro+gyro*part;
             r.binTime+=part;dt-=part;
             if(r.binTime>=1.0/kSampleHz-1e-9) {

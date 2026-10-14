@@ -100,7 +100,9 @@
     const rt = runtime();
     if (!rt) return;
     rt.setConnected(true);
-    rt.setControls(p.buttons, p.flags, p.stick[0], p.stick[1]);
+    if (p.orientation) rt.setOrientation(p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.half[0], p.half[1]);
+    // Orientation first: the runtime only looks at it once the Absolute flag below says it is valid.
+    rt.setControls(p.buttons, p.orientation ? p.flags : p.flags & ~P.FLAGS.Absolute, p.stick[0], p.stick[1]);
     rt.push(p.timeMs, p.gyro[0], p.gyro[1], p.gyro[2], p.acc[0], p.acc[1], p.acc[2]);
   }
 

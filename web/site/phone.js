@@ -4,6 +4,7 @@
 (function () {
   'use strict';
   const P = window.WsrPhoneProtocol;
+  const Pose = window.WsrPhonePose;
   const DEG = Math.PI / 180;
   const $ = (id) => document.getElementById(id);
 
@@ -24,6 +25,13 @@
   let lastSent = 0;
   let wakeLock = null;
   let stick = [0, 0];          // Nunchuk stick, -1..1, up positive
+  // Absolute pointing (phone-pose.js): the browser's fused orientation, the calibrated screen frame
+  // and the screen's half-angles. Pose is sent only once both exist.
+  let qDevice = null;
+  let qDeviceAt = 0;
+  let screen = null;           // earth -> screen rotation from the "middle" calibration step
+  let half = null;             // [x, y] radians
+  const DEFAULT_HALF = [15 * DEG, 9 * DEG];   // a laptop at arm's length; the corners step measures it
 
   // ------------------------------------------------------------------------------------------ UI
   function setStatus(text, ok) {
@@ -56,6 +64,7 @@
     $('pair').style.display = 'none';
     $('pad').classList.add('on');
     applyNunchuk();
+    startCalibration(false);
     goFullscreen();
     connect();
   });
@@ -180,6 +189,14 @@
     const g = first.accelerationIncludingGravity;
     if (g && g.z !== null && g.z < -4) accelSign = -1;
     window.addEventListener('devicemotion', onMotion);
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try { await DeviceOrientationEvent.requestPermission(); } catch (_) { /* motion alone still works */ }
+    }
+    window.addEventListener('deviceorientation', (e) => {
+      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      qDevice = Pose.quatFromEuler(e.alpha, e.beta, e.gamma);
+      qDeviceAt = performance.now();
+    });
     setInterval(() => { if (performance.now() - lastSent > 50) send(); }, 50);
   }
 
@@ -193,10 +210,99 @@
     send(e.timeStamp);
   }
 
+  // ------------------------------------------------------------------------------------------ calibration
+  // Like a sensor bar: the middle of the screen fixes the frame (up stays gravity's up), the two
+  // corners give the screen's size as seen from where the player stands. The size is kept between
+  // visits; the middle is captured again each time (the browser's heading reference is per page).
+  const calib = { step: null, corners: false, topLeft: null };
+  try {
+    const saved = JSON.parse(localStorage.getItem('wsrScreenHalf') || 'null');
+    if (Array.isArray(saved) && saved.length === 2 && saved.every((v) => v > 2 * DEG && v < 80 * DEG)) half = saved;
+  } catch (_) { /* none saved */ }
+
+  const STEPS = {
+    middle: { what: 'Point at the middle of the screen', dot: [50, 50] },
+    topLeft: { what: 'Point at the top-left corner of the screen', dot: [0, 0] },
+    bottomRight: { what: 'Point at the bottom-right corner of the screen', dot: [100, 100] },
+  };
+
+  function showStep() {
+    const s = STEPS[calib.step];
+    const order = calib.corners ? ['middle', 'topLeft', 'bottomRight'] : ['middle'];
+    $('calib').querySelector('.step').textContent = `Calibration ${order.indexOf(calib.step) + 1} of ${order.length}`;
+    $('calib').querySelector('.what').textContent = s.what;
+    const dot = $('calib').querySelector('.target i');
+    dot.style.left = `${s.dot[0]}%`; dot.style.top = `${s.dot[1]}%`;
+    $('calibSkip').style.display = calib.step === 'topLeft' ? '' : 'none';
+    $('calib').classList.add('on');
+  }
+
+  // corners: measure the screen size too (always on the first visit, or from the Calibrate button).
+  function startCalibration(corners, tries = 0) {
+    if (!qDevice) {
+      // The first orientation event can trail the first motion event by a moment.
+      if (tries < 10) { setTimeout(() => startCalibration(corners, tries + 1), 200); return; }
+      $('hint').textContent = 'This phone gives no orientation, so the cursor uses the gyro alone and may drift. Recenter fixes it.';
+      return;
+    }
+    calib.corners = corners || !half;
+    calib.step = 'middle';
+    showStep();
+    send();
+  }
+
+  function finishCalibration() {
+    calib.step = null;
+    $('calib').classList.remove('on');
+    send();
+  }
+
+  function captureMiddle() {
+    if (!qDevice) return false;
+    screen = Pose.screenFrame(Pose.tipDirection(qDevice));
+    return true;
+  }
+
+  $('calibTap').addEventListener('click', () => {
+    if (!qDevice) return;
+    if (navigator.vibrate) navigator.vibrate(15);
+    if (calib.step === 'middle') {
+      captureMiddle();
+      if (calib.corners) { calib.step = 'topLeft'; showStep(); } else finishCalibration();
+    } else if (calib.step === 'topLeft') {
+      calib.topLeft = Pose.tipDirection(qDevice);
+      calib.step = 'bottomRight'; showStep();
+    } else if (calib.step === 'bottomRight') {
+      const measured = Pose.screenHalfAngles(screen, calib.topLeft, Pose.tipDirection(qDevice));
+      if (!measured) {
+        $('calib').querySelector('.what').textContent = 'That did not look like the screen corners. Point at the top-left corner again';
+        calib.step = 'topLeft';
+        return;
+      }
+      half = measured;
+      try { localStorage.setItem('wsrScreenHalf', JSON.stringify(half)); } catch (_) { /* private mode */ }
+      finishCalibration();
+    }
+  });
+  $('calibSkip').addEventListener('click', () => {
+    if (!half) half = DEFAULT_HALF.slice();
+    finishCalibration();
+  });
+  $('calibrate').addEventListener('click', () => startCalibration(true));
+  // Recenter: the phone is pointing at the middle right now, so that becomes the frame again.
+  document.querySelector('[data-flag="Recenter"]').addEventListener('pointerdown', () => { if (screen) captureMiddle(); });
+
+  function currentPose() {
+    if (calib.step || !screen || !half || !qDevice || performance.now() - qDeviceAt > 500) return null;
+    return { q: Pose.bodyPose(screen, qDevice), half };
+  }
+
   // ------------------------------------------------------------------------------------------ transport
   function send(timeMs) {
-    const packet = P.encode(seq++, buttons, flags, timeMs === undefined ? lastSent || performance.now() : timeMs,
-      lastGyro, lastAcc, stick);
+    const pose = currentPose();
+    const sendButtons = calib.step ? 0 : buttons;   // taps while calibrating are not game input
+    const packet = P.encode(seq++, sendButtons, pose ? flags | P.FLAGS.Absolute : flags & ~P.FLAGS.Absolute,
+      timeMs === undefined ? lastSent || performance.now() : timeMs, lastGyro, lastAcc, stick, pose);
     // Packets without a fresh sensor time reuse the previous one, so the runtime only takes their buttons.
     if (timeMs !== undefined) lastSent = timeMs;
     if (channel && channel.readyState === 'open') {

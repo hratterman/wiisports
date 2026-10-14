@@ -58,8 +58,20 @@
   #pad.nunchuk #A { width: 88px; height: 88px; font-size: 26px; }
   #pad.nunchuk #B { min-height: 64px; }
   #pad.nunchuk .num { width: 56px; height: 56px; font-size: 20px; }
-  #pad.nunchuk #hint, #pad.nunchuk #tools { display: none; }
+  #pad.nunchuk #hint { display: none; }
+  #pad.nunchuk #tools .b { height: 40px; }
   #top { display: flex; gap: 16px; align-items: center; justify-content: center; }
+  #calib { position: fixed; inset: 0; z-index: 10; display: none; flex-direction: column; justify-content: center;
+    align-items: center; gap: 18px; padding: 24px; text-align: center; background: rgba(16, 20, 24, 0.97); }
+  #calib.on { display: flex; }
+  #calib .step { color: var(--muted); font-size: 15px; }
+  #calib .what { font-size: 26px; font-weight: 700; line-height: 1.25; }
+  #calib .how { color: var(--muted); }
+  #calib .target { width: 180px; height: 110px; border: 3px solid var(--btn); border-radius: 10px; position: relative; }
+  #calib .target i { position: absolute; width: 22px; height: 22px; border-radius: 50%; background: var(--accent);
+    transform: translate(-50%, -50%); }
+  #calibTap { width: 100%; max-width: 340px; min-height: 120px; font-size: 22px; }
+  #calibSkip { background: none; border: 0; color: var(--accent); font-size: 16px; padding: 8px; }
 </style>
 </head>
 <body>
@@ -74,6 +86,15 @@
     <p>Hold the phone like a remote: screen up, top edge pointing at the screen. Then tap Connect.</p>
     <button id="connect" class="primary" disabled>Connect</button>
     <div id="error" role="alert"></div>
+  </section>
+
+  <section id="calib" aria-live="polite">
+    <div class="step"></div>
+    <div class="what"></div>
+    <div class="target"><i></i></div>
+    <div class="how">Hold the phone like a remote, screen up, and aim its top edge.</div>
+    <button class="primary" id="calibTap">I'm pointing there</button>
+    <button id="calibSkip">Skip the corners (use a typical screen size)</button>
   </section>
 
   <section id="pad" aria-label="Wii Remote">
@@ -96,10 +117,11 @@
       <button class="b num" data-btn="2">2</button>
     </div>
     <div id="tools">
-      <button class="b" data-flag="Recenter">Hold to recenter</button>
+      <button class="b" data-flag="Recenter">Recenter</button>
+      <button class="b" id="calibrate">Calibrate</button>
       <button class="b" data-flag="Shake">Shake</button>
     </div>
-    <p id="hint">Point at the middle of the screen and hold "recenter" if the cursor drifts. Turn on Nunchuk
+    <p id="hint">If the cursor slides off, point at the middle of the screen and tap Recenter. Turn on Nunchuk
       (top right) for Archery, Cycling and anything else that asks for one.</p>
     <div id="nunchuk" aria-label="Nunchuk">
       <div id="stick" aria-label="Nunchuk stick"><div id="knob"></div></div>
@@ -113,6 +135,7 @@
   </section>
 </main>
 <script src="phone-protocol.js"></script>
+<script src="phone-pose.js"></script>
 <script src="phone.js"></script>
 </body>
 </html>

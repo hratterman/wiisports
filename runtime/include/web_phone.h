@@ -37,6 +37,7 @@ enum Flag : uint32_t {
     kFlagNunchuk = 0x4,    // a Nunchuk is attached (Archery, Cycling, anything that asks for one)
     kFlagNunchukShake = 0x8,  // shake the Nunchuk hand
     kFlagPedal = 0x10,     // the Nunchuk mirrors the phone's motion in the opposite direction (Cycling)
+    kFlagAbsolute = 0x20,  // calibrated absolute orientation is valid (Orientation() below)
 };
 
 // True while a phone is linked and has sent a report recently (the page clears it on disconnect).
@@ -47,6 +48,14 @@ uint32_t Buttons() noexcept;
 uint32_t Flags() noexcept;
 // Nunchuk stick, -1..1 each, up positive.
 void Stick(double& x, double& y) noexcept;
+
+// The phone's calibrated orientation, already in the virtual remote's frame: a unit quaternion
+// (w, x, y, z) taking remote-body vectors (X right, Y out of the phone's face, Z towards the player,
+// so the tip points along -Z) to the screen frame (X right, Y up, Z out of the screen towards the
+// player). Identity is the phone held screen up, pointing at the middle of the screen. halfX/halfY
+// are the calibrated half-angles (radians) from the screen's middle to its right and top edges.
+// Valid while Flags() has kFlagAbsolute.
+void Orientation(double q[4], double& halfX, double& halfY) noexcept;
 
 // What the virtual remote last handed the game, for the page's debug readout (Module.wsrPhone.debug()).
 struct DebugSample {
@@ -79,12 +88,15 @@ struct State {
     int16_t stickX;        // Nunchuk stick, -1000..1000, up positive
     int16_t stickY;
     DebugSample debug;     // offset 32, written by C++ only
+    float orientation[4];  // offset 96: w, x, y, z (see Orientation())
+    float halfX, halfY;    // offset 112, 116: radians
     Report reports[kRingSize];
 };
 State& Get() noexcept;
 // web/js/library_wsr_phone.js hardcodes these.
 static_assert(sizeof(DebugSample) == 64);
 static_assert(offsetof(State, stickX) == 28 && offsetof(State, debug) == 32);
+static_assert(offsetof(State, orientation) == 96 && offsetof(State, halfX) == 112);
 } // namespace detail
 
 template <typename Sink>

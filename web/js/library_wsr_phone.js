@@ -9,6 +9,8 @@
 //                                                   Wii Remote + Nunchuk button bits, kFlag* bits
 //                                                   (web_phone.h), Nunchuk stick -1..1 (up positive)
 //   Module.wsrPhone.push(timeMs, gx,gy,gz, ax,ay,az) one sensor report, SDL axes, rad/s and m/s^2
+//   Module.wsrPhone.setOrientation(w,x,y,z, halfX,halfY) calibrated pose + screen half-angles (radians),
+//                                                   used while flags carry kFlagAbsolute (web_phone.h)
 // Module callback (optional): Module.onWsrPhoneReady() once the ring exists.
 
 addToLibrary({
@@ -25,6 +27,7 @@ addToLibrary({
         'setControls': (buttons, flags, sx, sy) => WsrPhone.setControls(buttons, flags, sx, sy),
         'push': (t, gx, gy, gz, ax, ay, az) => WsrPhone.push(t, gx, gy, gz, ax, ay, az),
         'debug': () => WsrPhone.debug(),
+        'setOrientation': (w, x, y, z, hx, hy) => WsrPhone.setOrientation(w, x, y, z, hx, hy),
       };
     },
 
@@ -47,6 +50,15 @@ addToLibrary({
       HEAPU32[WsrPhone.u32(16)] = flags >>> 0;
       HEAP16[(WsrPhone.state + 28) >> 1] = axis(sx);
       HEAP16[(WsrPhone.state + 30) >> 1] = axis(sy);
+      return true;
+    },
+
+    // web_phone.h State.orientation at offset 96, halfX/halfY at 112/116.
+    setOrientation(w, x, y, z, hx, hy) {
+      if (!WsrPhone.state) return false;
+      const base = (WsrPhone.state + 96) >> 2;
+      HEAPF32[base] = w; HEAPF32[base + 1] = x; HEAPF32[base + 2] = y; HEAPF32[base + 3] = z;
+      HEAPF32[base + 4] = hx; HEAPF32[base + 5] = hy;
       return true;
     },
 

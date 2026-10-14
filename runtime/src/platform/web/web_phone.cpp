@@ -29,6 +29,12 @@ uint32_t Generation() noexcept { return detail::Get().generation; }
 uint32_t Buttons() noexcept { return detail::Get().buttons; }
 uint32_t Flags() noexcept { return detail::Get().flags; }
 void NoteSample(const DebugSample& sample) noexcept { detail::Get().debug = sample; }
+void Orientation(double q[4], double& halfX, double& halfY) noexcept {
+    const auto& s = detail::Get();
+    for (int i = 0; i < 4; ++i) q[i] = s.orientation[i];
+    halfX = s.halfX;
+    halfY = s.halfY;
+}
 void Stick(double& x, double& y) noexcept {
     const auto& s = detail::Get();
     x = s.stickX / 1000.0;

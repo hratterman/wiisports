@@ -218,7 +218,16 @@
     setInterval(() => { if (performance.now() - lastSent > 50) send(); }, 50);
   }
 
+  // Motion events per second, shown next to the status: the gyro's real update rate in this browser.
+  let motionCount = 0;
+  setInterval(() => {
+    const el = $('rate');
+    if (el) el.textContent = motionCount ? `· ${motionCount} Hz` : '';
+    motionCount = 0;
+  }, 1000);
+
   function onMotion(e) {
+    ++motionCount;
     const r = e.rotationRate;
     const g = e.accelerationIncludingGravity;
     if (!r || r.alpha === null) return;

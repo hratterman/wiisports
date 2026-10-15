@@ -78,6 +78,8 @@ addToLibrary({
         pos: [f(0), f(4)], roll: f(8), gyro: [f(12), f(16), f(20)], acc: [f(24), f(28), f(32)],
         stick: [f(36), f(40)], nunchukAcc: [f(44), f(48), f(52)], hold: HEAPU32[(s.state + 32 + 56) >> 2],
         pointerValid: b(60) !== 0, nunchuk: b(61) !== 0, devType: b(62), mplsMode: b(63),
+        // The game's MotionPlus solver output (web_phone.h NoteMpls): turns/s, turns, direction rows.
+        mpls: HEAPU32[(s.mpls + 60) >> 2] ? Array.from({ length: 15 }, (_, i) => HEAPF32[(s.mpls >> 2) + i]) : null,
       };
     },
 
@@ -97,7 +99,8 @@ addToLibrary({
 
   wsr_phone_attach__deps: ['$WsrPhone'],
   wsr_phone_attach: (slot, state, size, reportsOffset, ringSize) => {
-    WsrPhone.slots[slot] = { state, reports: state + reportsOffset, ring: ringSize };
+    WsrPhone.slots[slot] = { state, reports: state + reportsOffset, ring: ringSize,
+                             mpls: state + reportsOffset + ringSize * 40 };
     if (slot === 0 && typeof Module['onWsrPhoneReady'] === 'function') setTimeout(() => Module['onWsrPhoneReady'](), 0);
   },
 });

@@ -31,6 +31,11 @@ uint32_t Generation(uint32_t slot) noexcept { return detail::Get(slot).generatio
 uint32_t Buttons(uint32_t slot) noexcept { return detail::Get(slot).buttons; }
 uint32_t Flags(uint32_t slot) noexcept { return detail::Get(slot).flags; }
 void NoteSample(const DebugSample& sample, uint32_t slot) noexcept { detail::Get(slot).debug = sample; }
+void NoteMpls(const float mpls[15], bool valid, uint32_t slot) noexcept {
+    auto& s = detail::Get(slot);
+    for (int i = 0; i < 15; ++i) s.mpls[i] = mpls[i];
+    s.mplsValid = valid ? 1 : 0;
+}
 void Orientation(double q[4], double& halfX, double& halfY, uint32_t slot) noexcept {
     const auto& s = detail::Get(slot);
     for (int i = 0; i < 4; ++i) q[i] = s.orientation[i];

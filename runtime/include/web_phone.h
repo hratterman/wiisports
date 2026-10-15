@@ -74,6 +74,9 @@ struct DebugSample {
     uint8_t pointerValid, nunchuk, devType, mplsMode;
 };
 void NoteSample(const DebugSample& sample, uint32_t slot = 0) noexcept;
+// The game's own MotionPlus solver output for the newest sample (KPADStatus 0xB0..0xEC: rate,
+// angle, dirX, dirY, dirZ, 15 floats), for the debug readout. valid is false while MotionPlus is off.
+void NoteMpls(const float mpls[15], bool valid, uint32_t slot = 0) noexcept;
 
 // Calls `sink` for every report written since the previous drain, oldest first. When the ring
 // overflowed in between, the oldest reports are dropped.
@@ -96,6 +99,8 @@ struct State {
     float orientation[4];  // offset 96: w, x, y, z (see Orientation())
     float halfX, halfY;    // offset 112, 116: radians
     Report reports[kRingSize];
+    float mpls[15];        // after the ring, written by C++ only (NoteMpls)
+    uint32_t mplsValid;
 };
 State& Get(uint32_t slot = 0) noexcept;
 // web/js/library_wsr_phone.js hardcodes these.

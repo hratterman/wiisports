@@ -900,7 +900,10 @@ uint32_t StepController(const HostInput& in) {
         if(r.sensorTime && report.time<=r.sensorTime)continue;
         double dt=r.sensorTime?static_cast<double>(report.time-r.sensorTime)*1e-9:0;
         r.sensorTime=report.time;
-        if(dt<=0 || dt>.05) {r.binTime=0;r.binGyro={};continue;}
+        // A gap longer than this is a dropout, not motion. Phones deliver motion events at 30-60 Hz
+        // and a browser under load can space them past 50 ms, so the limit leaves room for that:
+        // a stricter one threw away most of a slow phone's rotation.
+        if(dt<=0 || dt>.12) {r.binTime=0;r.binGyro={};continue;}
         const Vec3 gyro=r.bias.correct(report.gyro,report.acc,dt);
         while(dt>1e-9) {
             const double part=std::min(dt,1.0/kSampleHz-r.binTime);
@@ -929,6 +932,9 @@ uint32_t StepController(const HostInput& in) {
         d.hold=s.hold;d.pointerValid=s.pointerValid?1:0;d.nunchuk=s.nunchuk?1:0;
         d.mplsMode=RequestedMplsMode(r.channel);d.devType=DeviceType(d.mplsMode!=0,s.nunchuk);
         WebPhone::NoteSample(d, r.channel);
+        float m[15];
+        for(int i=0;i<15;i++){const uint32_t w=s.mpls[i];std::memcpy(&m[i],&w,4);}
+        WebPhone::NoteMpls(m,s.sdkMpls,r.channel);
     }
 #endif
     const uint32_t n=static_cast<uint32_t>(generated.size());

@@ -32,6 +32,7 @@
     background: var(--panel); color: var(--text); border: 2px solid var(--btn); }
   #players button[aria-pressed="true"] { border-color: var(--accent); background: var(--btn); }
   #player { font-weight: 700; color: var(--text); }
+  #rate { font-variant-numeric: tabular-nums; }
   #pad { flex: 1; display: none; flex-direction: column; gap: 12px; }
   #pad.on { display: flex; }
   .row { display: flex; gap: 12px; justify-content: center; }
@@ -81,7 +82,7 @@
 </head>
 <body>
 <main>
-  <div id="status"><span id="dot"></span><span id="player"></span><span id="statusText">Not connected</span>
+  <div id="status"><span id="dot"></span><span id="player"></span><span id="statusText">Not connected</span><span id="rate"></span>
     <label class="switch"><input type="checkbox" id="nunchukOn"> Nunchuk</label></div>
 
   <section id="pair">

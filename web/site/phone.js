@@ -45,6 +45,22 @@
   codeInput.value = (params.get('code') || localStorage.getItem('wsrPhoneCode') || '').toUpperCase();
   const validCode = () => new RegExp(`^[${P.CODE_ALPHABET}]{4}$`).test(codeInput.value.toUpperCase());
   const refreshConnect = () => { connectButton.disabled = !validCode(); };
+
+  // Which player this phone is. Player 2 joins the room named by the code plus "2" (phone-link.js).
+  let player = params.get('player') === '2' ? 2 : params.get('player') === '1' ? 1 : 0;
+  if (!player) { try { player = localStorage.getItem('wsrPlayer') === '2' ? 2 : 1; } catch (_) { player = 1; } }
+  const playerButtons = document.querySelectorAll('#players [data-player]');
+  const showPlayer = () => {
+    for (const b of playerButtons) b.setAttribute('aria-pressed', String(Number(b.dataset.player) === player));
+  };
+  for (const b of playerButtons) {
+    b.addEventListener('click', () => {
+      player = Number(b.dataset.player);
+      try { localStorage.setItem('wsrPlayer', String(player)); } catch (_) { /* private mode */ }
+      showPlayer();
+    });
+  }
+  showPlayer();
   codeInput.addEventListener('input', () => {
     codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
     refreshConnect();
@@ -59,8 +75,10 @@
       showError(err.message || String(err));
       return;
     }
-    room = codeInput.value.toUpperCase();
-    try { localStorage.setItem('wsrPhoneCode', room); } catch (_) { /* private mode */ }
+    const code = codeInput.value.toUpperCase();
+    try { localStorage.setItem('wsrPhoneCode', code); } catch (_) { /* private mode */ }
+    room = player === 2 ? `${code}2` : code;
+    $('player').textContent = `P${player}`;
     $('pair').style.display = 'none';
     $('pad').classList.add('on');
     applyNunchuk();
@@ -313,7 +331,7 @@
   }
 
   function connect() {
-    setStatus(`Connecting to ${room}...`);
+    setStatus(`Connecting to ${room.slice(0, 4)}...`);
     ws = new WebSocket(P.signalUrl(room, 'phone'));
     ws.binaryType = 'arraybuffer';
     ws.onmessage = (e) => { if (typeof e.data === 'string') onSignal(JSON.parse(e.data)); };
@@ -324,14 +342,14 @@
       setStatus('Connection lost, retrying...');
       setTimeout(connect, 1500);
     };
-    ws.onopen = () => setStatus(`Waiting for the game (code ${room})...`);
+    ws.onopen = () => setStatus(`Waiting for the game (code ${room.slice(0, 4)})...`);
   }
 
   function onSignal(msg) {
     if (msg.t === 'peer') {
       peerOn = msg.on;
       if (msg.on) startPeer();
-      else { closePeer(); setStatus(`Waiting for the game (code ${room})...`); }
+      else { closePeer(); setStatus(`Waiting for the game (code ${room.slice(0, 4)})...`); }
     } else if (msg.t === 'answer' && pc) {
       pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(() => {});
     } else if (msg.t === 'ice' && pc && msg.c) {

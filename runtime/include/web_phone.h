@@ -9,11 +9,16 @@
 // screen facing you: +X right, +Y towards the top of the phone, +Z out of the screen. The phone's top
 // edge is the remote's tip. Gyro is rad/s, acceleration is m/s^2 support force (+9.81 on the axis
 // pointing up when still), as SDL reports both.
+//
+// Two phones can be linked at once, one per slot: slot 0 is player 1's remote (WPAD channel 0) and
+// slot 1 is player 2's (channel 1). Each slot has its own ring.
 
 #include <cstddef>
 #include <cstdint>
 
 namespace WebPhone {
+
+inline constexpr uint32_t kSlots = 2;
 
 struct Report {
     uint64_t timeNs;   // phone sensor time, monotonic per connection
@@ -41,13 +46,13 @@ enum Flag : uint32_t {
 };
 
 // True while a phone is linked and has sent a report recently (the page clears it on disconnect).
-bool Connected() noexcept;
+bool Connected(uint32_t slot = 0) noexcept;
 // A new value whenever the page links a different phone or relinks; resets the remote's state.
-uint32_t Generation() noexcept;
-uint32_t Buttons() noexcept;
-uint32_t Flags() noexcept;
+uint32_t Generation(uint32_t slot = 0) noexcept;
+uint32_t Buttons(uint32_t slot = 0) noexcept;
+uint32_t Flags(uint32_t slot = 0) noexcept;
 // Nunchuk stick, -1..1 each, up positive.
-void Stick(double& x, double& y) noexcept;
+void Stick(double& x, double& y, uint32_t slot = 0) noexcept;
 
 // The phone's calibrated orientation, already in the virtual remote's frame: a unit quaternion
 // (w, x, y, z) taking remote-body vectors (X right, Y out of the phone's face, Z towards the player,
@@ -55,7 +60,7 @@ void Stick(double& x, double& y) noexcept;
 // player). Identity is the phone held screen up, pointing at the middle of the screen. halfX/halfY
 // are the calibrated half-angles (radians) from the screen's middle to its right and top edges.
 // Valid while Flags() has kFlagAbsolute.
-void Orientation(double q[4], double& halfX, double& halfY) noexcept;
+void Orientation(double q[4], double& halfX, double& halfY, uint32_t slot = 0) noexcept;
 
 // What the virtual remote last handed the game, for the page's debug readout (Module.wsrPhone.debug()).
 struct DebugSample {
@@ -68,12 +73,12 @@ struct DebugSample {
     uint32_t hold;
     uint8_t pointerValid, nunchuk, devType, mplsMode;
 };
-void NoteSample(const DebugSample& sample) noexcept;
+void NoteSample(const DebugSample& sample, uint32_t slot = 0) noexcept;
 
 // Calls `sink` for every report written since the previous drain, oldest first. When the ring
 // overflowed in between, the oldest reports are dropped.
 template <typename Sink>
-void Drain(Sink&& sink) noexcept;
+void Drain(uint32_t slot, Sink&& sink) noexcept;
 
 namespace detail {
 static constexpr uint32_t kRingSize = 256;
@@ -92,7 +97,7 @@ struct State {
     float halfX, halfY;    // offset 112, 116: radians
     Report reports[kRingSize];
 };
-State& Get() noexcept;
+State& Get(uint32_t slot = 0) noexcept;
 // web/js/library_wsr_phone.js hardcodes these.
 static_assert(sizeof(DebugSample) == 64);
 static_assert(offsetof(State, stickX) == 28 && offsetof(State, debug) == 32);
@@ -100,8 +105,8 @@ static_assert(offsetof(State, orientation) == 96 && offsetof(State, halfX) == 11
 } // namespace detail
 
 template <typename Sink>
-void Drain(Sink&& sink) noexcept {
-    auto& s = detail::Get();
+void Drain(uint32_t slot, Sink&& sink) noexcept {
+    auto& s = detail::Get(slot);
     const uint32_t write = s.writeCount;
     if (write - s.readCount > detail::kRingSize) s.readCount = write - detail::kRingSize;
     for (; s.readCount != write; ++s.readCount) sink(s.reports[s.readCount % detail::kRingSize]);

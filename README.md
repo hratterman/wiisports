@@ -140,6 +140,12 @@ precompiled in `web/prebuilt/`, so a host only compiles the runtime and their ow
   controls panel (☰, then Controls). Other devices need the `https://` address from "Let other
   people play".
 - **Saves** stay in your browser. Clearing the site's data deletes them.
+- **Phones as Wii Remotes:** open `/phone.html` on the same site on a phone, type the code from
+  the game's Phone card, pick Player 1 or Player 2, and tap Connect. Two phones can be linked at
+  once: Player 1's is the first Wii Remote, Player 2's the second.
+- **Shaders:** the first time a scene appears, its shaders compile, which can hitch it. The page
+  remembers every shader setup the game has used and compiles them all in the background at the
+  next launch, so later sessions start with them ready.
 - **Disc copy:** the disc streams from the server at first. About ten seconds after the game
   starts, the page also downloads the whole disc (about 850 MB) into the browser in the
   background, pausing whenever the game itself is reading, and a "Caching disc" chip on the

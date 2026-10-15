@@ -7,17 +7,17 @@
   const P = window.WsrPhoneProtocol;
   const STALE_MS = 1500;
 
-  let room = '';
-  let ws = null;
-  let pc = null;
-  let lastPacketAt = 0;
-  let linked = false;
-  let mode = '';
+  const PLAYERS = 2;
+  let code = '';
 
   function newCode() {
     const bytes = crypto.getRandomValues(new Uint8Array(4));
     return Array.from(bytes, (b) => P.CODE_ALPHABET[b % P.CODE_ALPHABET.length]).join('');
   }
+
+  // Player 1's phone joins the room named by the code, player 2's the code with a 2 after it
+  // (phone.js roomFor()), so the signaling servers need no notion of players.
+  const roomFor = (slot) => slot ? `${code}${slot + 1}` : code;
 
   // ------------------------------------------------------------------------------------------ UI
   const style = document.createElement('style');
@@ -28,7 +28,7 @@
     #phone-card[hidden] { display: none; }
     #phone-card .code { font: 700 30px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .25em; margin: 6px 0; }
     #phone-card .url { color: #8bc7ff; word-break: break-all; }
-    #phone-card .state { color: #8b97a3; margin-top: 6px; }
+    #phone-card .state { color: #8b97a3; margin-top: 2px; }
     #phone-card .ok { color: #3ecf8e; }
     #phone-card button { margin-top: 8px; background: #2a323c; color: inherit; border: 0; border-radius: 8px; padding: 6px 10px; font: inherit; }
   `;
@@ -42,7 +42,9 @@
     <div class="url"></div>
     <div>and enter</div>
     <div class="code"></div>
-    <div class="state">Waiting for a phone...</div>
+    <div>A second phone enters the same code and picks Player 2.</div>
+    <div class="state" data-slot="0"></div>
+    <div class="state" data-slot="1"></div>
     <button type="button" class="hide">Hide</button>`;
   document.body.appendChild(card);
   card.querySelector('.url').textContent = `${location.host}/phone.html`;
@@ -62,101 +64,124 @@
   }
 
   function render() {
-    card.querySelector('.code').textContent = room;
-    const state = card.querySelector('.state');
-    if (linked) {
-      state.textContent = `Phone connected (${mode}).`;
-      state.className = 'state ok';
-    } else {
-      state.textContent = ws && ws.readyState === WebSocket.OPEN ? 'Waiting for a phone...' : 'Connecting to the pairing service...';
-      state.className = 'state';
+    card.querySelector('.code').textContent = code;
+    for (const link of links) {
+      const state = card.querySelector(`.state[data-slot="${link.slot}"]`);
+      const who = `Player ${link.slot + 1}`;
+      if (link.linked) {
+        state.textContent = `${who}: phone connected (${link.mode}).`;
+        state.className = 'state ok';
+      } else {
+        state.textContent = link.ws && link.ws.readyState === WebSocket.OPEN
+          ? `${who}: waiting for a phone...` : `${who}: connecting to the pairing service...`;
+        state.className = 'state';
+      }
     }
   }
 
   // ------------------------------------------------------------------------------------------ runtime
-  function runtime() {
+  function runtime(slot) {
     const m = window.Module && window.Module.wsrPhone;
-    return m && m.ready() ? m : null;
+    return m && m.ready(slot) ? m : null;
   }
 
-  function setLinked(on, how) {
-    if (on === linked && (!on || how === mode)) return;
-    linked = on;
-    mode = how || '';
-    const rt = runtime();
-    if (rt) rt.setConnected(on);
-    // Collapse the card a few seconds after a phone links; the toolbar button brings it back.
-    if (on) setTimeout(() => { if (linked) card.hidden = true; }, 4000);
-    render();
+  // ------------------------------------------------------------------------------------------ one player's link
+  class Link {
+    constructor(slot) {
+      this.slot = slot;
+      this.ws = null;
+      this.pc = null;
+      this.lastPacketAt = 0;
+      this.linked = false;
+      this.mode = '';
+    }
+
+    setLinked(on, how) {
+      if (on === this.linked && (!on || how === this.mode)) return;
+      this.linked = on;
+      this.mode = how || '';
+      const rt = runtime(this.slot);
+      if (rt) rt.setConnected(on, this.slot);
+      // Collapse the card a few seconds after a phone links; the toolbar button brings it back.
+      if (on) setTimeout(() => { if (links.every((l) => l.linked || !l.everLinked)) card.hidden = true; }, 4000);
+      if (on) this.everLinked = true;
+      render();
+    }
+
+    onPacket(data, how) {
+      const p = P.decode(data);
+      if (!p) return;
+      this.lastPacketAt = performance.now();
+      if (!this.linked || this.mode !== how) this.setLinked(true, how);
+      // The ring only exists once the runtime has polled the remote, so the link state is re-asserted
+      // with every packet rather than once.
+      const slot = this.slot;
+      const rt = runtime(slot);
+      if (!rt) return;
+      rt.setConnected(true, slot);
+      if (p.orientation) rt.setOrientation(p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.half[0], p.half[1], slot);
+      // Orientation first: the runtime only looks at it once the Absolute flag below says it is valid.
+      rt.setControls(p.buttons, p.orientation ? p.flags : p.flags & ~P.FLAGS.Absolute, p.stick[0], p.stick[1], slot);
+      rt.push(p.timeMs, p.gyro[0], p.gyro[1], p.gyro[2], p.acc[0], p.acc[1], p.acc[2], slot);
+    }
+
+    connect() {
+      const ws = this.ws = new WebSocket(P.signalUrl(roomFor(this.slot), 'screen'));
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = render;
+      ws.onmessage = (e) => {
+        if (typeof e.data !== 'string') { this.onPacket(e.data, 'relayed'); return; }
+        const msg = JSON.parse(e.data);
+        if (msg.t === 'peer' && !msg.on) { this.closePeer(); this.setLinked(false); }
+        else if (msg.t === 'offer') this.answer(msg.sdp);
+        else if (msg.t === 'ice' && this.pc && msg.c) this.pc.addIceCandidate(msg.c).catch(() => {});
+      };
+      ws.onclose = () => {
+        this.closePeer();
+        this.setLinked(false);
+        render();
+        setTimeout(() => this.connect(), 2000);
+      };
+      render();
+    }
+
+    async answer(sdp) {
+      this.closePeer();
+      if (typeof RTCPeerConnection === 'undefined') return;
+      const pc = this.pc = new RTCPeerConnection({ iceServers: P.ICE_SERVERS });
+      pc.onicecandidate = (e) => {
+        if (e.candidate && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ t: 'ice', c: e.candidate }));
+      };
+      pc.ondatachannel = (e) => {
+        const channel = e.channel;
+        channel.binaryType = 'arraybuffer';
+        channel.onmessage = (m) => this.onPacket(m.data, 'direct');
+      };
+      await pc.setRemoteDescription({ type: 'offer', sdp });
+      const reply = await pc.createAnswer();
+      await pc.setLocalDescription(reply);
+      this.ws.send(JSON.stringify({ t: 'answer', sdp: reply.sdp }));
+    }
+
+    closePeer() {
+      if (this.pc) { try { this.pc.close(); } catch (_) { /* closed */ } }
+      this.pc = null;
+    }
   }
 
-  function onPacket(data, how) {
-    const p = P.decode(data);
-    if (!p) return;
-    lastPacketAt = performance.now();
-    if (!linked || mode !== how) setLinked(true, how);
-    // The ring only exists once the runtime has polled the remote, so the link state is re-asserted
-    // with every packet rather than once.
-    const rt = runtime();
-    if (!rt) return;
-    rt.setConnected(true);
-    if (p.orientation) rt.setOrientation(p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.half[0], p.half[1]);
-    // Orientation first: the runtime only looks at it once the Absolute flag below says it is valid.
-    rt.setControls(p.buttons, p.orientation ? p.flags : p.flags & ~P.FLAGS.Absolute, p.stick[0], p.stick[1]);
-    rt.push(p.timeMs, p.gyro[0], p.gyro[1], p.gyro[2], p.acc[0], p.acc[1], p.acc[2]);
-  }
+  const links = Array.from({ length: PLAYERS }, (_, slot) => new Link(slot));
 
   setInterval(() => {
-    if (linked && performance.now() - lastPacketAt > STALE_MS) setLinked(false);
+    for (const link of links) {
+      if (link.linked && performance.now() - link.lastPacketAt > STALE_MS) link.setLinked(false);
+    }
   }, 250);
 
-  // ------------------------------------------------------------------------------------------ transport
-  function connect() {
-    ws = new WebSocket(P.signalUrl(room, 'screen'));
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = render;
-    ws.onmessage = (e) => {
-      if (typeof e.data !== 'string') { onPacket(e.data, 'relayed'); return; }
-      const msg = JSON.parse(e.data);
-      if (msg.t === 'peer' && !msg.on) { closePeer(); setLinked(false); }
-      else if (msg.t === 'offer') answer(msg.sdp);
-      else if (msg.t === 'ice' && pc && msg.c) pc.addIceCandidate(msg.c).catch(() => {});
-    };
-    ws.onclose = () => {
-      closePeer();
-      setLinked(false);
-      render();
-      setTimeout(connect, 2000);
-    };
-    render();
-  }
-
-  async function answer(sdp) {
-    closePeer();
-    if (typeof RTCPeerConnection === 'undefined') return;
-    pc = new RTCPeerConnection({ iceServers: P.ICE_SERVERS });
-    pc.onicecandidate = (e) => { if (e.candidate && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'ice', c: e.candidate })); };
-    pc.ondatachannel = (e) => {
-      const channel = e.channel;
-      channel.binaryType = 'arraybuffer';
-      channel.onmessage = (m) => onPacket(m.data, 'direct');
-    };
-    await pc.setRemoteDescription({ type: 'offer', sdp });
-    const reply = await pc.createAnswer();
-    await pc.setLocalDescription(reply);
-    ws.send(JSON.stringify({ t: 'answer', sdp: reply.sdp }));
-  }
-
-  function closePeer() {
-    if (pc) { try { pc.close(); } catch (_) { /* closed */ } }
-    pc = null;
-  }
-
   // Keep one code per browser so a bookmarked phone page keeps working across reloads.
-  try { room = localStorage.getItem('wsrRoomCode') || ''; } catch (_) { room = ''; }
-  if (!new RegExp(`^[${P.CODE_ALPHABET}]{4}$`).test(room)) {
-    room = newCode();
-    try { localStorage.setItem('wsrRoomCode', room); } catch (_) { /* private mode */ }
+  try { code = localStorage.getItem('wsrRoomCode') || ''; } catch (_) { code = ''; }
+  if (!new RegExp(`^[${P.CODE_ALPHABET}]{4}$`).test(code)) {
+    code = newCode();
+    try { localStorage.setItem('wsrRoomCode', code); } catch (_) { /* private mode */ }
   }
   addToolbarButton();
   // Show the card on the loading screen only: once the game is running it would cover Resort's
@@ -171,6 +196,6 @@
   if (location.protocol === 'file:') {
     card.querySelector('.state').textContent = 'Phone pairing needs the site to be served over http(s).';
   } else {
-    connect();
+    for (const link of links) link.connect();
   }
 })();

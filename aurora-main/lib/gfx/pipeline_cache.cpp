@@ -10,6 +10,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -371,7 +373,92 @@ static PipelineCacheWrite make_pipeline_cache_write(ShaderType type, PipelineRef
   return write;
 }
 
+#ifdef __EMSCRIPTEN__
+// Browser build: no sqlite database and no writer thread. Every pipeline recipe (the config a
+// pipeline is built from) first used in a session is appended to a small file in the cache
+// directory, which lives in the IndexedDB-persisted home directory. The next launch queues every
+// recipe in it as a background build, which build_synchronous_pipelines_for_frame starts with
+// createRenderPipelineAsync a batch per frame, so a scene's shaders are usually compiled before the
+// scene first appears instead of hitching it.
+namespace web_recipes {
+constexpr uint32_t Magic = 0x31525741u; // "AWR1"
+constexpr long MaxFileBytes = 16L * 1024 * 1024;
+struct RecordHeader {
+  uint32_t type;
+  uint32_t configVersion;
+  uint64_t hash;
+  uint32_t size;
+  uint32_t firstFrameUsed;
+};
+static_assert(sizeof(RecordHeader) == 24);
+static std::vector<PipelineCacheWrite> g_unsaved;
+static absl::flat_hash_set<PipelineRef> g_known;
+static uint32_t g_lastFlushFrame = 0;
+
+static std::string path() {
+  return fs_path_to_string(fs_path_from_string(g_config.pipelineCachePath) / "pipeline_recipes.bin");
+}
+
+static void write_records(FILE* file, const std::vector<PipelineCacheWrite>& records) {
+  for (const auto& r : records) {
+    const RecordHeader header{
+        .type = static_cast<uint32_t>(underlying(r.type)),
+        .configVersion = r.configVersion,
+        .hash = static_cast<uint64_t>(r.hash),
+        .size = static_cast<uint32_t>(r.config.size()),
+        .firstFrameUsed = r.firstFrameUsed,
+    };
+    std::fwrite(&header, sizeof(header), 1, file);
+    std::fwrite(r.config.data(), 1, r.config.size(), file);
+  }
+}
+
+// Appends this session's new recipes. Closing the file is what makes the store persist it.
+static void flush() {
+  if (g_unsaved.empty() || g_config.pipelineCachePath == nullptr) {
+    return;
+  }
+  FILE* file = std::fopen(path().c_str(), "ab");
+  if (file == nullptr) {
+    g_unsaved.clear();
+    return;
+  }
+  std::fseek(file, 0, SEEK_END);
+  const long size = std::ftell(file);
+  if (size < MaxFileBytes) {
+    if (size == 0) {
+      std::fwrite(&Magic, sizeof(Magic), 1, file);
+    }
+    write_records(file, g_unsaved);
+  }
+  std::fclose(file);
+  g_unsaved.clear();
+}
+
+static void note(PipelineCacheWrite write) {
+  if (g_known.insert(write.hash).second) {
+    g_unsaved.emplace_back(std::move(write));
+  }
+}
+
+// Called once per frame: save in batches rather than on every first use.
+static void maybe_flush() {
+  const uint32_t frame = current_frame();
+  if (!g_unsaved.empty() && (g_unsaved.size() >= 64 || frame - g_lastFlushFrame >= 300)) {
+    flush();
+  }
+  if (g_unsaved.empty()) {
+    g_lastFlushFrame = frame;
+  }
+}
+} // namespace web_recipes
+#endif
+
 static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
+#ifdef __EMSCRIPTEN__
+  web_recipes::note(std::move(write));
+  return;
+#endif
   if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
     return;
   }
@@ -1252,6 +1339,117 @@ static void load_pipeline_cache() {
   }
 }
 
+#ifdef __EMSCRIPTEN__
+template <typename PipelineConfig, typename CreateFn>
+static bool queue_web_recipe(ShaderType type, uint32_t configVersion, const web_recipes::RecordHeader& header,
+                             const uint8_t* blob, CreateFn&& create) {
+  if (header.size != sizeof(PipelineConfig) || header.configVersion != configVersion ||
+      xxh3_hash_s(blob, header.size, static_cast<HashType>(type)) != static_cast<PipelineRef>(header.hash)) {
+    return false;
+  }
+  PipelineConfig config;
+  std::memcpy(&config, blob, sizeof(config));
+  if (config.version != configVersion) {
+    return false;
+  }
+  if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+    if (!gx::valid_pipeline_config(config)) {
+      return false;
+    }
+  }
+  web_recipes::g_known.insert(static_cast<PipelineRef>(header.hash));
+  find_pipeline_impl(type, config, [=] { return create(config); }, false, header.firstFrameUsed);
+  return true;
+}
+
+// Queues every saved recipe for a background build, in the order the game first used them. A file
+// with stale entries (another renderer version) is rewritten with only the usable ones.
+static void load_web_recipes() {
+  if (g_config.pipelineCachePath == nullptr) {
+    return;
+  }
+  const std::string file = web_recipes::path();
+  FILE* in = std::fopen(file.c_str(), "rb");
+  if (in == nullptr) {
+    return;
+  }
+  std::vector<uint8_t> data;
+  std::fseek(in, 0, SEEK_END);
+  const long size = std::ftell(in);
+  std::fseek(in, 0, SEEK_SET);
+  if (size > 0 && size <= web_recipes::MaxFileBytes) {
+    data.resize(static_cast<size_t>(size));
+    data.resize(std::fread(data.data(), 1, data.size(), in));
+  }
+  std::fclose(in);
+
+  struct Entry {
+    web_recipes::RecordHeader header;
+    size_t offset;
+  };
+  std::vector<Entry> entries;
+  bool clean = data.size() >= sizeof(uint32_t) && std::memcmp(data.data(), &web_recipes::Magic, 4) == 0;
+  size_t at = clean ? sizeof(uint32_t) : data.size();
+  while (at + sizeof(web_recipes::RecordHeader) <= data.size()) {
+    web_recipes::RecordHeader header;
+    std::memcpy(&header, data.data() + at, sizeof(header));
+    at += sizeof(header);
+    if (header.size > 64 * 1024 || at + header.size > data.size()) {
+      clean = false; // truncated tail
+      break;
+    }
+    entries.push_back({header, at});
+    at += header.size;
+  }
+  std::stable_sort(entries.begin(), entries.end(),
+                   [](const Entry& a, const Entry& b) { return a.header.firstFrameUsed < b.header.firstFrameUsed; });
+
+  std::vector<PipelineCacheWrite> kept;
+  for (const auto& e : entries) {
+    const uint8_t* blob = data.data() + e.offset;
+    if (web_recipes::g_known.contains(static_cast<PipelineRef>(e.header.hash))) {
+      clean = false; // duplicate
+      continue;
+    }
+    bool ok = false;
+    if (e.header.type == static_cast<uint32_t>(underlying(ShaderType::GX))) {
+      ok = queue_web_recipe<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion, e.header, blob,
+                                                gx::create_pipeline);
+    } else if (e.header.type == static_cast<uint32_t>(underlying(ShaderType::Clear))) {
+      ok = queue_web_recipe<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion, e.header,
+                                                   blob, clear::create_pipeline);
+    }
+    if (!ok) {
+      clean = false;
+      continue;
+    }
+    PipelineCacheWrite write{
+        .type = static_cast<ShaderType>(e.header.type),
+        .hash = static_cast<PipelineRef>(e.header.hash),
+        .configVersion = e.header.configVersion,
+        .config = ByteBuffer(e.header.size),
+        .firstFrameUsed = e.header.firstFrameUsed,
+    };
+    std::memcpy(write.config.data(), blob, e.header.size);
+    kept.emplace_back(std::move(write));
+  }
+  if (!clean) {
+    if (FILE* out = std::fopen(file.c_str(), "wb")) {
+      std::fwrite(&web_recipes::Magic, sizeof(web_recipes::Magic), 1, out);
+      web_recipes::write_records(out, kept);
+      std::fclose(out);
+    }
+  }
+  const auto queued = queuedPipelines.load();
+  Log.info("Pipeline prewarm: {} saved recipes queued for background compilation", queued);
+  if (queued > 0) {
+    g_prewarmCount = queued;
+    g_prewarmStart = std::chrono::steady_clock::now();
+    g_prewarmActive.store(true, std::memory_order_release);
+  }
+}
+#endif
+
 static void start_pipeline_cache_writer() {
   if (!prepare_pipeline_cache_db()) {
     return;
@@ -1295,9 +1493,11 @@ void initialize_pipeline_cache() {
   g_activeBackgroundPipelineWorkers = 0;
 
 #ifdef __EMSCRIPTEN__
-  // Single-threaded browser build: pipelines compile synchronously on first use, and there is no
-  // on-disk sqlite cache to load from or write to (the browser keeps its own shader cache).
+  // Single-threaded browser build: no compiler threads and no sqlite cache. Recipes saved by earlier
+  // sessions are queued for background async builds instead (web_recipes above); the browser's own
+  // shader cache then makes those builds cheap.
   g_hasPipelineThread = false;
+  load_web_recipes();
   return;
 #endif
   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
@@ -1361,6 +1561,9 @@ void end_pipeline_frame() {
   if (!g_hasPipelineThread) {
     build_synchronous_pipelines_for_frame();
   }
+#ifdef __EMSCRIPTEN__
+  web_recipes::maybe_flush();
+#endif
 }
 
 void set_skip_unready_pipelines(bool enabled) noexcept {

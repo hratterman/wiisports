@@ -201,6 +201,7 @@ struct Sample {
 };
 
 struct Remote {
+    uint32_t channel = 0;        // WPAD channel this remote answers for (1: the second phone, web only)
     bool announced = false;
     Conventions conv;
     // aim
@@ -246,6 +247,8 @@ struct Remote {
 };
 
 Remote g_local;
+// [web] Player 2's remote: a second linked phone (web_phone.h slot 1) on WPAD channel 1.
+Remote g_second = [] { Remote r; r.channel = 1; return r; }();
 std::array<Remote, 2> g_onlineRemotes;
 Remote* g_currentRemote = &g_local;
 Remote& CurrentRemote() { return *g_currentRemote; }
@@ -274,6 +277,7 @@ void AccumulateSolverResult(const Sample& sample) {
 
 void CaptureMappedSample(const Sample& s) {
     if (!Tape::Recording() && !Online::Active()) return;
+    if (CurrentRemote().channel != 0) return;   // recordings and online play carry player 1 only
     if (g_capture.samples.size() == Riisorted::Netplay::kMaxMotionSamples)
         throw std::runtime_error("Motion capture backlog exceeds the bounded sample window");
     Riisorted::Netplay::MotionSample input;
@@ -342,6 +346,10 @@ SDL_Gamepad* DualSenseGamepad() {
 bool VirtualRemoteActive(uint32_t chan) {
     if (Online::Active()) return chan < 2;
     if (Tape::Replaying()) return chan == 0;
+#if defined(__EMSCRIPTEN__)
+    // A second linked phone is player 2.
+    if (chan == 1) return WebPhone::Connected(1) && !WiiRemoteInput::IsRemoteChannel(1);
+#endif
     if (chan == 0 && Tape::Recording() && WiiRemoteInput::IsRemoteChannel(0))
         throw std::runtime_error("Motion recording currently supports the virtual remote only");
     // A real Bluetooth remote on the channel wins; the virtual one only stands in for channel 0.
@@ -350,6 +358,16 @@ bool VirtualRemoteActive(uint32_t chan) {
 
 uint8_t RequestedMplsMode(uint32_t chan) {
     return Memory::Read8(guest::kKpadStateBase + chan * guest::kKpadStateStride + guest::kKpadMplsRequestedMode);
+}
+
+// The remote that answers for `chan` outside online play.
+Remote& RemoteFor(uint32_t chan) {
+    if (Online::Active() && chan < 2) return g_onlineRemotes[chan];
+    if (chan == 1) {
+        g_second.conv = g_local.conv;
+        return g_second;
+    }
+    return g_local;
 }
 
 // ------------------------------------------------------------------------------------------------ host input
@@ -379,15 +397,17 @@ struct HostInput {
 // Pseudo joystick IDs above any SDL hands out, one per link generation, so a relink resets the remote.
 constexpr SDL_JoystickID kPhoneIdBase = 0x70000000u;
 
-SDL_JoystickID PhoneId() {
-    return WebPhone::Connected() ? kPhoneIdBase + (WebPhone::Generation() & 0x0FFFFFFFu) : 0;
+SDL_JoystickID PhoneId(uint32_t slot) {
+    return WebPhone::Connected(slot)
+               ? kPhoneIdBase + (slot << 27) + (WebPhone::Generation(slot) & 0x07FFFFFFu) : 0;
 }
 
 void ReadPhone(HostInput& in) {
     Remote& r = CurrentRemote();
+    const uint32_t slot = r.channel;
     in.controller = true;
     in.focused = !InputBindings::InputBlocked();
-    WebPhone::Drain([&](const WebPhone::Report& report) {
+    WebPhone::Drain(slot, [&](const WebPhone::Report& report) {
         const Vec3 gyro{report.gyro[0], report.gyro[1], report.gyro[2]};
         const Vec3 acc{report.acc[0], report.acc[1], report.acc[2]};
         if (!std::isfinite(gyro.x) || !std::isfinite(gyro.y) || !std::isfinite(gyro.z) ||
@@ -406,15 +426,15 @@ void ReadPhone(HostInput& in) {
         r.sensors.clear(); r.sensorTime = 0; r.binTime = 0; r.binGyro = {};
         return;
     }
-    const uint32_t flags = WebPhone::Flags();
+    const uint32_t flags = WebPhone::Flags(slot);
     in.nunchuk = (flags & WebPhone::kFlagNunchuk) != 0;
-    in.hold = WebPhone::Buttons() & (kBtnLeft | kBtnRight | kBtnDown | kBtnUp | kBtnPlus | kBtn2 | kBtn1 |
+    in.hold = WebPhone::Buttons(slot) & (kBtnLeft | kBtnRight | kBtnDown | kBtnUp | kBtnPlus | kBtn2 | kBtn1 |
                                      kBtnB | kBtnA | kBtnMinus | kBtnHome | (in.nunchuk ? kBtnZ | kBtnC : 0u));
     in.recenter = (flags & WebPhone::kFlagRecenter) != 0;
     in.shake = (flags & WebPhone::kFlagShake) != 0;
     if (flags & WebPhone::kFlagAbsolute) {
         double q[4], hx = 0, hy = 0;
-        WebPhone::Orientation(q, hx, hy);
+        WebPhone::Orientation(q, hx, hy, slot);
         const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
         if (std::isfinite(n) && n > 0.5 && hx > 2 * kDeg && hx < 80 * kDeg && hy > 2 * kDeg && hy < 80 * kDeg) {
             in.absolute = true;
@@ -426,7 +446,7 @@ void ReadPhone(HostInput& in) {
     if (in.nunchuk) {
         in.nunchukShake = (flags & WebPhone::kFlagNunchukShake) != 0;
         in.pedal = (flags & WebPhone::kFlagPedal) != 0;
-        WebPhone::Stick(in.stick[0], in.stick[1]);
+        WebPhone::Stick(in.stick[0], in.stick[1], slot);
     }
 }
 #endif
@@ -436,8 +456,10 @@ HostInput ReadHost() {
     in.window = SDL_GetKeyboardFocus();
     in.focused = in.window != nullptr && !InputBindings::InputBlocked();
 #if defined(__EMSCRIPTEN__)
-    const SDL_JoystickID phoneId = PhoneId();
-    SDL_Gamepad* pad = phoneId ? nullptr : DualSenseGamepad();
+    // Player 2 (channel 1) is only ever the second phone; with it gone the remote idles.
+    const bool second = CurrentRemote().channel == 1;
+    const SDL_JoystickID phoneId = PhoneId(CurrentRemote().channel);
+    SDL_Gamepad* pad = phoneId || second ? nullptr : DualSenseGamepad();
     const SDL_JoystickID padId = phoneId ? phoneId : pad ? SDL_GetGamepadID(pad) : 0;
 #else
     SDL_Gamepad* pad = DualSenseGamepad();
@@ -466,6 +488,11 @@ HostInput ReadHost() {
 #if defined(__EMSCRIPTEN__)
     if (phoneId) {
         ReadPhone(in);
+        return in;
+    }
+    if (second) {
+        in.controller = true;
+        in.focused = false;
         return in;
     }
 #endif
@@ -825,7 +852,7 @@ uint32_t StepController(const HostInput& in) {
         if(!in.absolute)r.pointerPose={};
         if (!Online::Active()) {
             GuestInterruptCallbackContext call;
-            call.get()->gpr[3]=0;
+            call.get()->gpr[3]=r.channel;
             func_800CE180(call.get());
         }
     }
@@ -863,7 +890,7 @@ uint32_t StepController(const HostInput& in) {
         s.roll=std::atan2(s.R.m[0][1],s.R.m[1][1]);
         r.angle=r.angle+gyro*(dt/kMplsUnitRadPerSec);s.angle=r.angle;
         CaptureMappedSample(s);
-        if(!Online::Active() && RequestedMplsMode(0))ProcessMotionPlus(s);
+        if(!Online::Active() && RequestedMplsMode(r.channel))ProcessMotionPlus(s, r.channel);
         AccumulateSolverResult(s);
         generated.push_back(s);
         if(generated.size()>16)generated.pop_front();
@@ -900,8 +927,8 @@ uint32_t StepController(const HostInput& in) {
         d.nunchukAcc[0]=static_cast<float>(s.nunchukAcc.x);d.nunchukAcc[1]=static_cast<float>(s.nunchukAcc.y);
         d.nunchukAcc[2]=static_cast<float>(s.nunchukAcc.z);
         d.hold=s.hold;d.pointerValid=s.pointerValid?1:0;d.nunchuk=s.nunchuk?1:0;
-        d.mplsMode=RequestedMplsMode(0);d.devType=DeviceType(d.mplsMode!=0,s.nunchuk);
-        WebPhone::NoteSample(d);
+        d.mplsMode=RequestedMplsMode(r.channel);d.devType=DeviceType(d.mplsMode!=0,s.nunchuk);
+        WebPhone::NoteSample(d, r.channel);
     }
 #endif
     const uint32_t n=static_cast<uint32_t>(generated.size());
@@ -911,6 +938,7 @@ uint32_t StepController(const HostInput& in) {
 }
 
 uint32_t Step(uint32_t maxSamples) {
+    if (CurrentRemote().channel != 0) return StepLive(maxSamples);   // player 2: live phone input only
     g_solverHash = 14695981039346656037ull;
     if (Tape::Replaying()) {
         auto next = Tape::Replay(static_cast<uint64_t>(g_gxFrameCount), RequestedMplsMode(0));
@@ -1095,6 +1123,7 @@ void HandleSdlEvent(const SDL_Event& ev) {
 // WPADProbe for the virtual remote. Returns false when chan is not ours.
 bool Probe(uint32_t chan, uint32_t typePtr, int32_t& result) {
     if (!VirtualRemoteActive(chan)) return false;
+    RemoteScope remote(RemoteFor(chan));
     Announce();
     if (typePtr) Memory::Write32(typePtr, DeviceType(RequestedMplsMode(chan) != 0, CurrentRemote().nunchuk));
     result = 0;
@@ -1153,7 +1182,7 @@ PPC_NATIVE_OVERRIDE(800254C0, WPADControlMpls_HLE, int32_t,
 
 // KPADReadEx(chan, KPADStatus* buf, u32 len, s32* err, BOOL keepLastOnNoData) -> number of samples
 extern "C" int32_t KPADReadEx_HLE(uint32_t chan, uint32_t buf, uint32_t len, uint32_t errPtr, uint32_t keepLast) {
-    RemoteScope remote(Online::Active() && chan < 2 ? g_onlineRemotes[chan] : g_local);
+    RemoteScope remote(RemoteFor(chan));
     (void)keepLast;
     int32_t err = guest::kKpadErrNone;
     int32_t written = 0;
@@ -1216,7 +1245,7 @@ PPC_NATIVE_OVERRIDE(800CB890, KPADReadEx_HLE, int32_t,
 
 // KPAD raw sample copy (KPADGetUnifiedWpadStatus): count 0x40-byte samples, newest first.
 extern "C" void KPADGetUnifiedWpadStatus_HLE(uint32_t chan, uint32_t dst, uint32_t count) {
-    RemoteScope remote(Online::Active() && chan < 2 ? g_onlineRemotes[chan] : g_local);
+    RemoteScope remote(RemoteFor(chan));
     if (Online::Active() && chan < 2) EnsureOnlineFrame();
     try {
         count = std::min<uint32_t>(count, 16);

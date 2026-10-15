@@ -152,6 +152,8 @@ Then report to Henry, using the template in "Reporting back".
   in the same way, type the 4-letter code shown on the game screen (the Phone button in the game's
   toolbar shows it again), hold the phone screen up with its top edge pointing at the screen, and
   tap Connect.
+- **Two players:** a second phone opens the same page, types the same code, picks **Player 2**,
+  and taps Connect. It becomes the second Wii Remote.
 
 ## Reporting back
 

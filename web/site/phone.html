@@ -27,6 +27,11 @@
   .primary { background: var(--accent); color: #fff; border: 0; border-radius: 12px; padding: 16px; font-size: 18px; font-weight: 600; }
   .primary:disabled { opacity: 0.4; }
   #error { color: var(--warn); min-height: 1.4em; }
+  #players { display: flex; gap: 10px; }
+  #players button { flex: 1; padding: 14px; font-size: 17px; font-weight: 600; border-radius: 12px;
+    background: var(--panel); color: var(--text); border: 2px solid var(--btn); }
+  #players button[aria-pressed="true"] { border-color: var(--accent); background: var(--btn); }
+  #player { font-weight: 700; color: var(--text); }
   #pad { flex: 1; display: none; flex-direction: column; gap: 12px; }
   #pad.on { display: flex; }
   .row { display: flex; gap: 12px; justify-content: center; }
@@ -76,13 +81,17 @@
 </head>
 <body>
 <main>
-  <div id="status"><span id="dot"></span><span id="statusText">Not connected</span>
+  <div id="status"><span id="dot"></span><span id="player"></span><span id="statusText">Not connected</span>
     <label class="switch"><input type="checkbox" id="nunchukOn"> Nunchuk</label></div>
 
   <section id="pair">
     <h1>Use this phone as the Wii Remote</h1>
     <p>Enter the code shown on the game screen.</p>
     <input id="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text" aria-label="Pairing code">
+    <div id="players" role="group" aria-label="Which player">
+      <button type="button" data-player="1" aria-pressed="true">Player 1</button>
+      <button type="button" data-player="2" aria-pressed="false">Player 2</button>
+    </div>
     <p>Hold the phone like a remote: screen up, top edge pointing at the screen. Then tap Connect.</p>
     <button id="connect" class="primary" disabled>Connect</button>
     <div id="error" role="alert"></div>

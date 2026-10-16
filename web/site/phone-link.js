@@ -26,10 +26,14 @@
       background: rgba(16, 20, 24, 0.92); color: #e8edf2; border-radius: 14px; padding: 14px 16px;
       font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
     #phone-card[hidden] { display: none; }
-    #phone-card .code { font: 700 30px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .25em; margin: 6px 0; }
+    #phone-card .code { font: 700 16px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .15em; }
     #phone-card .url { color: #8bc7ff; word-break: break-all; }
     #phone-card .state { color: #8b97a3; margin-top: 2px; }
     #phone-card .ok { color: #3ecf8e; }
+    #phone-card .qrs { display: flex; gap: 12px; margin: 8px 0 4px; }
+    #phone-card figure { margin: 0; text-align: center; font-weight: 600; }
+    #phone-card .qr { background: #fff; padding: 6px; border-radius: 8px; line-height: 0; }
+    #phone-card .qr img { width: 128px; height: 128px; image-rendering: pixelated; }
     #phone-card button { margin-top: 8px; background: #2a323c; color: inherit; border: 0; border-radius: 8px; padding: 6px 10px; font: inherit; }
   `;
   document.head.appendChild(style);
@@ -38,11 +42,12 @@
   card.id = 'phone-card';
   card.setAttribute('aria-live', 'polite');
   card.innerHTML = `
-    <div>Use your phone as the Wii Remote. On the phone, open</div>
-    <div class="url"></div>
-    <div>and enter</div>
-    <div class="code"></div>
-    <div>A second phone enters the same code and picks Player 2.</div>
+    <div>Scan with your phone's camera to use it as a Wii Remote:</div>
+    <div class="qrs">
+      <figure><div class="qr" data-slot="0"></div><figcaption>Player 1</figcaption></figure>
+      <figure><div class="qr" data-slot="1"></div><figcaption>Player 2</figcaption></figure>
+    </div>
+    <div>Or open <span class="url"></span> and enter <span class="code"></span></div>
     <div class="state" data-slot="0"></div>
     <div class="state" data-slot="1"></div>
     <button type="button" class="hide">Hide</button>`;
@@ -61,6 +66,22 @@
     b.title = 'Show the phone pairing code';
     b.addEventListener('click', () => { card.hidden = !card.hidden; });
     toolbar.insertBefore(b, toolbar.firstChild);
+  }
+
+  // One QR code per player: the phone page reads code and player from the address and only needs
+  // the Connect tap (motion sensor permission needs a tap on iOS).
+  function phoneUrl(slot) {
+    return `${location.origin}/phone.html?code=${code}&player=${slot + 1}`;
+  }
+  function drawQrCodes() {
+    if (typeof window.qrcode !== 'function') return;   // qrcode.js missing: the code alone still works
+    for (const el of card.querySelectorAll('.qr')) {
+      const qr = window.qrcode(0, 'M');
+      qr.addData(phoneUrl(Number(el.dataset.slot)));
+      qr.make();
+      el.innerHTML = qr.createImgTag(4, 0);
+      el.querySelector('img').alt = `QR code for Player ${Number(el.dataset.slot) + 1}`;
+    }
   }
 
   function render() {
@@ -184,6 +205,7 @@
     try { localStorage.setItem('wsrRoomCode', code); } catch (_) { /* private mode */ }
   }
   addToolbarButton();
+  drawQrCodes();
   // Show the card on the loading screen only: once the game is running it would cover Resort's
   // corner prompts. The toolbar's Phone button brings it back.
   const loader = document.getElementById('loader');

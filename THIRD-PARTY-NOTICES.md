@@ -11,6 +11,13 @@ or data of any kind - see the [README](README.md).
 
 ## Bundled in this repository
 
+### qrcode-generator - MIT
+
+Copyright (c) 2009 Kazuhiko Arase.
+Source: <https://github.com/kazuhikoarase/qrcode-generator> (npm `qrcode-generator` 1.4.4), vendored
+unmodified as `web/site/qrcode.js`; the license notice is in its header. Draws the phone pairing QR
+codes.
+
 ### aurora - MIT
 
 Copyright (c) 2022 Luke Street.
